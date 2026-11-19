@@ -1,0 +1,60 @@
+From 614de31b05e3744872c469bc9bd91730e0f5b3ef Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 07:21:43 +0000
+Subject: [PATCH 23/47] arm64: dts: qcom: x1-denali: Add audio playback over
+ DisplayPort
+
+Add the DAI links needed to enable audio playback over the two
+USB/DisplayPort outputs. Apply the upstream Denali links to the final SP11
+FullIO sound graph, which also contains TX DMIC, VI and CPS links.
+
+Upstream-commit: 420a70ddaf299dadab1fb50492b275c8b54e9c4a
+Signed-off-by: Dale Whinham <daleyo@gmail.com>
+Signed-off-by: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+---
+ .../boot/dts/qcom/x1-microsoft-denali.dtsi    | 32 +++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi b/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
+index 281bd24a7..684d30e40 100644
+--- a/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
++++ b/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
+@@ -350,6 +350,38 @@ platform {
+ 			};
+ 		};
+ 
++		displayport-0-dai-link {
++			link-name = "DisplayPort0 Playback";
++
++			codec {
++				sound-dai = <&mdss_dp0>;
++			};
++
++			cpu {
++				sound-dai = <&q6apmbedai DISPLAY_PORT_RX_0>;
++			};
++
++			platform {
++				sound-dai = <&q6apm>;
++			};
++		};
++
++		displayport-1-dai-link {
++			link-name = "DisplayPort1 Playback";
++
++			codec {
++				sound-dai = <&mdss_dp1>;
++			};
++
++			cpu {
++				sound-dai = <&q6apmbedai DISPLAY_PORT_RX_1>;
++			};
++
++			platform {
++				sound-dai = <&q6apm>;
++			};
++		};
++
+ 		wsa-dai-link {
+ 			link-name = "WSA Playback";
+ 

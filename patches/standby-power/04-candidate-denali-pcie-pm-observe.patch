@@ -1,0 +1,110 @@
+--- a/drivers/pci/controller/dwc/pcie-qcom.c
++++ b/drivers/pci/controller/dwc/pcie-qcom.c
+@@ -20,6 +20,7 @@
+ #include <linux/kernel.h>
+ #include <linux/limits.h>
+ #include <linux/init.h>
++#include <linux/moduleparam.h>
+ #include <linux/of.h>
+ #include <linux/of_pci.h>
+ #include <linux/pci.h>
+@@ -33,6 +34,7 @@
+ #include <linux/regulator/consumer.h>
+ #include <linux/reset.h>
+ #include <linux/slab.h>
++#include <linux/string.h>
+ #include <linux/types.h>
+ #include <linux/units.h>
+ 
+@@ -44,6 +46,7 @@
+ /* PARF registers */
+ #define PARF_SYS_CTRL				0x00
+ #define PARF_PM_CTRL				0x20
++#define PARF_PM_STTS				0x24
+ #define PARF_PCS_DEEMPH				0x34
+ #define PARF_PCS_SWING				0x38
+ #define PARF_PHY_CTRL				0x40
+@@ -295,6 +298,17 @@
+ 	struct list_head perst;
+ };
+ 
++/* Diagnostic for the two internal PCIe links on the Surface Pro 11. */
++static bool denali_pm_observe;
++module_param(denali_pm_observe, bool, 0400);
++MODULE_PARM_DESC(denali_pm_observe, "Sample Denali PCIe status around PME_Turn_Off");
++
++struct qcom_pcie_pm_observation {
++	u32 status;
++	u32 l2_count;
++	bool valid;
++};
++
+ struct qcom_pcie {
+ 	struct dw_pcie *pci;
+ 	void __iomem *parf;			/* DT parf */
+@@ -308,6 +322,7 @@
+ 	struct gpio_desc *reset;
+ 	int global_irq;
+ 	bool use_pm_opp;
++	struct qcom_pcie_pm_observation pm_observation;
+ };
+ 
+ #define to_qcom_pcie(x)		dev_get_drvdata((x)->dev)
+@@ -1450,10 +1465,31 @@
+ 	return ret;
+ }
+ 
++static bool qcom_pcie_denali_pm_enabled(struct qcom_pcie *pcie)
++{
++	struct device *dev = pcie->pci->dev;
++
++	return denali_pm_observe && pcie->mhi &&
++	       of_machine_is_compatible("microsoft,denali") &&
++	       of_device_is_compatible(dev->of_node, "qcom,pcie-x1e80100") &&
++	       (!strcmp(dev_name(dev), "1c08000.pcie") ||
++		!strcmp(dev_name(dev), "1bf8000.pcie"));
++}
++
+ static void qcom_pcie_host_deinit(struct dw_pcie_rp *pp)
+ {
+ 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
+ 	struct qcom_pcie *pcie = to_qcom_pcie(pci);
++	struct qcom_pcie_pm_observation *observation = &pcie->pm_observation;
++	bool observed = observation->valid;
++	u32 status = 0, l2_count = 0;
++
++	/* Sample while the controller is still powered and before PERST. */
++	if (observed) {
++		status = readl_relaxed(pcie->parf + PARF_PM_STTS);
++		l2_count = readl_relaxed(pcie->mhi + PARF_DEBUG_CNT_PM_LINKST_IN_L2);
++		observation->valid = false;
++	}
+ 
+ 	qcom_pcie_perst_assert(pcie);
+ 
+@@ -1467,6 +1503,10 @@
+ 
+ 	qcom_pcie_phy_power_off(pcie);
+ 	pcie->cfg->ops->deinit(pcie);
++
++	if (observed)
++		dev_info(pci->dev, "Denali PME: PM_STTS %#x -> %#x, L2 count %u -> %u\n",
++			 observation->status, status, observation->l2_count, l2_count);
+ }
+ 
+ static void qcom_pcie_host_post_init(struct dw_pcie_rp *pp)
+@@ -1494,6 +1534,14 @@
+ static void qcom_pcie_host_pme_turn_off(struct dw_pcie_rp *pp)
+ {
+ 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
++	struct qcom_pcie *pcie = to_qcom_pcie(pci);
++	struct qcom_pcie_pm_observation *observation = &pcie->pm_observation;
++
++	if (qcom_pcie_denali_pm_enabled(pcie)) {
++		observation->status = readl_relaxed(pcie->parf + PARF_PM_STTS);
++		observation->l2_count = readl_relaxed(pcie->mhi + PARF_DEBUG_CNT_PM_LINKST_IN_L2);
++		observation->valid = true;
++	}
+ 
+ 	writel(ELBI_SYS_CTRL_PME_TURNOFF_MSG, pci->elbi_base + ELBI_SYS_CTRL);
+ }

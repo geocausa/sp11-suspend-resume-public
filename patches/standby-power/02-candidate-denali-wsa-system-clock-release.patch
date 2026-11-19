@@ -1,0 +1,134 @@
+--- a/sound/soc/codecs/lpass-wsa-macro.c
++++ b/sound/soc/codecs/lpass-wsa-macro.c
+@@ -437,6 +437,8 @@
+ 	struct clk *macro;
+ 	struct clk *dcodec;
+ 	struct clk *fsgen;
++	bool system_clock_release;
++	bool retained_clocks_held;
+ 	struct clk_hw hw;
+ };
+ #define to_wsa_macro(_hw) container_of(_hw, struct wsa_macro, hw)
+@@ -2927,20 +2929,42 @@
+ 	.num_dapm_routes = ARRAY_SIZE(wsa_audio_map),
+ };
+ 
+-static void wsa_macro_disable_retained_clock(void *clock)
++static bool denali_release_clocks_in_sleep;
++module_param(denali_release_clocks_in_sleep, bool, 0444);
++MODULE_PARM_DESC(denali_release_clocks_in_sleep,
++		 "Release idle Denali WSA hardware clock votes in system suspend");
++
++static void wsa_macro_disable_retained_clocks(void *data)
+ {
+-	clk_disable_unprepare(clock);
++	struct wsa_macro *wsa = data;
++
++	if (!wsa->retained_clocks_held)
++		return;
++
++	clk_disable_unprepare(wsa->dcodec);
++	clk_disable_unprepare(wsa->macro);
++	wsa->retained_clocks_held = false;
+ }
+ 
+-static int wsa_macro_enable_retained_clock(struct device *dev, struct clk *clock)
++static int wsa_macro_enable_retained_clocks(struct wsa_macro *wsa)
+ {
+ 	int ret;
+ 
+-	ret = clk_prepare_enable(clock);
++	if (wsa->retained_clocks_held)
++		return 0;
++
++	ret = clk_prepare_enable(wsa->macro);
+ 	if (ret)
+ 		return ret;
+ 
+-	return devm_add_action_or_reset(dev, wsa_macro_disable_retained_clock, clock);
++	ret = clk_prepare_enable(wsa->dcodec);
++	if (ret) {
++		clk_disable_unprepare(wsa->macro);
++		return ret;
++	}
++
++	wsa->retained_clocks_held = true;
++	return 0;
+ }
+ 
+ static int wsa_macro_probe(struct platform_device *pdev)
+@@ -3058,12 +3082,14 @@
+ 	 * clock list; other boards retain the upstream all-clock policy.
+ 	 */
+ 	if (retain_clocks) {
+-		ret = wsa_macro_enable_retained_clock(dev, wsa->macro);
++		ret = wsa_macro_enable_retained_clocks(wsa);
+ 		if (ret)
+ 			return ret;
+-		ret = wsa_macro_enable_retained_clock(dev, wsa->dcodec);
++		ret = devm_add_action_or_reset(dev, wsa_macro_disable_retained_clocks,
++					      wsa);
+ 		if (ret)
+ 			return ret;
++		wsa->system_clock_release = denali_release_clocks_in_sleep;
+ 	}
+ 
+ 	ret = devm_pm_clk_create(dev);
+@@ -3154,6 +3180,13 @@
+ 	struct wsa_macro *wsa = dev_get_drvdata(dev);
+ 	int ret, sret;
+ 
++	/* A failed system-resume clock restore must precede any MMIO. */
++	if (wsa->system_clock_release) {
++		ret = wsa_macro_enable_retained_clocks(wsa);
++		if (ret)
++			return ret;
++	}
++
+ 	ret = pm_clk_resume(dev);
+ 	if (ret) {
+ 		regcache_cache_only(wsa->regmap, true);
+@@ -3177,7 +3210,43 @@
+ 	return 0;
+ }
+ 
++static int wsa_macro_suspend(struct device *dev)
++{
++	struct wsa_macro *wsa = dev_get_drvdata(dev);
++
++	if (!wsa->system_clock_release)
++		return 0;
++
++	pm_runtime_disable(dev);
++	/* SoundWire holds a runtime reference while its interface clock runs. */
++	if (!pm_runtime_status_suspended(dev)) {
++		pm_runtime_enable(dev);
++		return dev_err_probe(dev, -EBUSY, "WSA is active at system suspend\n");
++	}
++
++	wsa_macro_disable_retained_clocks(wsa);
++	return 0;
++}
++
++static int wsa_macro_resume(struct device *dev)
++{
++	struct wsa_macro *wsa = dev_get_drvdata(dev);
++	int ret;
++
++	if (!wsa->system_clock_release)
++		return 0;
++
++	ret = wsa_macro_enable_retained_clocks(wsa);
++	pm_runtime_enable(dev);
++	if (ret)
++		dev_err(dev, "failed to restore retained WSA clocks: %d\n", ret);
++
++	return ret;
++}
++
+ static const struct dev_pm_ops wsa_macro_pm_ops = {
++	.suspend = pm_sleep_ptr(wsa_macro_suspend),
++	.resume = pm_sleep_ptr(wsa_macro_resume),
+ 	RUNTIME_PM_OPS(wsa_macro_runtime_suspend, wsa_macro_runtime_resume, NULL)
+ };
+ 

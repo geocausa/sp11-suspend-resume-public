@@ -1,0 +1,324 @@
+From d3b3798540985b59ff52b684bc68488c7c6c0d18 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 21:37:46 +0000
+Subject: [PATCH 07/47] soundwire: add SP11 protected-feedback transport
+ support
+
+Port the accepted SP11 VI/CPS protected-feedback transport semantics from
+the Golden-v31 source snapshot onto Linux v7.3 while preserving the newer
+generic SoundWire core behavior.
+
+The extra feedback data ports are used only by the SP11 protected speaker
+graph and retain the Windows-derived port mapping required by the Golden
+speaker path.
+
+Signed-off-by: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+---
+ drivers/soundwire/bus.h       |  4 ++
+ drivers/soundwire/qcom.c      | 58 +++++++++++++++++++++----
+ drivers/soundwire/stream.c    | 80 ++++++++++++++++++++++++++++++++++-
+ include/linux/soundwire/sdw.h | 16 +++++++
+ 4 files changed, 149 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/soundwire/bus.h b/drivers/soundwire/bus.h
+index 44e4f5193..a9f3f9f30 100644
+--- a/drivers/soundwire/bus.h
++++ b/drivers/soundwire/bus.h
+@@ -117,6 +117,8 @@ int sdw_find_col_index(int col);
+  * @ch_mask: Channel mask
+  * @transport_params: Transport parameters
+  * @port_params: Port parameters
++ * @transport_params_override_mask: Bitmask of per-slave transport overrides
++ * @transport_params_override: Per-slave transport override values
+  * @port_node: List node for Master or Slave port_list
+  * @lane: Which lane is used
+  *
+@@ -128,6 +130,8 @@ struct sdw_port_runtime {
+ 	int ch_mask;
+ 	struct sdw_transport_params transport_params;
+ 	struct sdw_port_params port_params;
++	unsigned int transport_params_override_mask;
++	struct sdw_transport_params transport_params_override;
+ 	struct list_head port_node;
+ 	unsigned int lane;
+ };
+diff --git a/drivers/soundwire/qcom.c b/drivers/soundwire/qcom.c
+index 55678a30c..88c6b1b4a 100644
+--- a/drivers/soundwire/qcom.c
++++ b/drivers/soundwire/qcom.c
+@@ -1233,7 +1233,7 @@ static void qcom_swrm_stream_free_ports(struct qcom_swrm_ctrl *ctrl,
+ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
+ 					struct sdw_stream_runtime *stream,
+ 				       struct snd_pcm_hw_params *params,
+-				       int direction)
++				       int dai_id)
+ {
+ 	struct sdw_stream_config sconfig;
+ 	struct sdw_master_runtime *m_rt;
+@@ -1241,14 +1241,20 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
+ 	struct sdw_port_runtime *p_rt;
+ 	struct sdw_slave *slave;
+ 	unsigned long *port_mask;
+-	int maxport, pn, nports = 0;
++	int maxport, pn, nports = 0, i;
+ 	unsigned int m_port;
+ 	struct sdw_port_config *pconfig __free(kfree) = kzalloc_objs(*pconfig,
+ 								     ctrl->nports);
+ 	if (!pconfig)
+ 		return -ENOMEM;
+ 
+-	if (direction == SNDRV_PCM_STREAM_CAPTURE)
++	/*
++	 * Direction is a property of the controller data port.  A speaker VI
++	 * sidechain is intentionally exposed as a companion playback BE so
++	 * DPCM starts it with render, while the physical DIN port still carries
++	 * data from the SoundWire slaves into the master.
++	 */
++	if (dai_id >= ctrl->num_dout_ports)
+ 		sconfig.direction = SDW_DATA_DIR_TX;
+ 	else
+ 		sconfig.direction = SDW_DATA_DIR_RX;
+@@ -1288,6 +1294,21 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
+ 					dev_err(ctrl->dev, "All ports busy\n");
+ 					return -EBUSY;
+ 				}
++
++				/* Multiple slaves may intentionally share one physical
++				 * master port. Keep one master runtime and merge the
++				 * channels instead of programming the same port twice.
++				 */
++				for (i = 0; i < nports; i++) {
++					if (pconfig[i].num != pn)
++						continue;
++
++					pconfig[i].ch_mask |= p_rt->ch_mask;
++					break;
++				}
++				if (i < nports)
++					continue;
++
+ 				set_bit(pn, port_mask);
+ 				pconfig[nports].num = pn;
+ 				pconfig[nports].ch_mask = p_rt->ch_mask;
+@@ -1311,7 +1332,7 @@ static int qcom_swrm_hw_params(struct snd_pcm_substream *substream,
+ 	int ret;
+ 
+ 	ret = qcom_swrm_stream_alloc_ports(ctrl, sruntime, params,
+-					   substream->stream);
++					   dai->id);
+ 	if (ret)
+ 		qcom_swrm_stream_free_ports(ctrl, sruntime);
+ 
+@@ -1411,15 +1432,36 @@ static int qcom_swrm_register_dais(struct qcom_swrm_ctrl *ctrl)
+ 		if (!dais[i].name)
+ 			return -ENOMEM;
+ 
+-		if (i < ctrl->num_dout_ports)
++		if (i < ctrl->num_dout_ports) {
+ 			stream = &dais[i].playback;
+-		else
++		} else {
+ 			stream = &dais[i].capture;
++			dais[i].playback = (struct snd_soc_pcm_stream) {
++				.channels_min = 1,
++				.channels_max = 1,
++				.rates = SNDRV_PCM_RATE_8000 |
++					 SNDRV_PCM_RATE_24000 |
++					 SNDRV_PCM_RATE_48000,
++				.formats = SNDRV_PCM_FMTBIT_S16_LE |
++					   SNDRV_PCM_FMTBIT_S32_LE,
++			};
++			dais[i].playback.stream_name = devm_kasprintf(
++				dev, GFP_KERNEL, "SoundWire VI Protection%d",
++				i - ctrl->num_dout_ports);
++			if (!dais[i].playback.stream_name)
++				return -ENOMEM;
++		}
+ 
+ 		stream->channels_min = 1;
+ 		stream->channels_max = 1;
+-		stream->rates = SNDRV_PCM_RATE_48000;
+-		stream->formats = SNDRV_PCM_FMTBIT_S16_LE;
++		stream->rates = i < ctrl->num_dout_ports ?
++				SNDRV_PCM_RATE_48000 :
++				SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_24000 |
++				SNDRV_PCM_RATE_48000;
++		stream->formats = i < ctrl->num_dout_ports ?
++				SNDRV_PCM_FMTBIT_S16_LE :
++				SNDRV_PCM_FMTBIT_S16_LE |
++				SNDRV_PCM_FMTBIT_S32_LE;
+ 
+ 		dais[i].ops = &qcom_swrm_pdm_dai_ops;
+ 		dais[i].id = i;
+diff --git a/drivers/soundwire/stream.c b/drivers/soundwire/stream.c
+index f106a877d..147651fd5 100644
+--- a/drivers/soundwire/stream.c
++++ b/drivers/soundwire/stream.c
+@@ -62,6 +62,65 @@ int sdw_find_row_index(int row)
+ }
+ EXPORT_SYMBOL(sdw_find_row_index);
+ 
++static int sdw_program_simple_ext(struct sdw_bus *bus, struct sdw_slave *slave,
++				  struct sdw_transport_params *t_params,
++				  u32 registers)
++{
++	u32 blockctrl3, samplectrl2, hctrl, offsetctrl2;
++	u16 wbuf;
++	int ret;
++
++	if (bus->params.next_bank) {
++		blockctrl3 = SDW_DPN_BLOCKCTRL3_B1(t_params->port_num);
++		samplectrl2 = SDW_DPN_SAMPLECTRL2_B1(t_params->port_num);
++		hctrl = SDW_DPN_HCTRL_B1(t_params->port_num);
++		offsetctrl2 = SDW_DPN_OFFSETCTRL2_B1(t_params->port_num);
++	} else {
++		blockctrl3 = SDW_DPN_BLOCKCTRL3_B0(t_params->port_num);
++		samplectrl2 = SDW_DPN_SAMPLECTRL2_B0(t_params->port_num);
++		hctrl = SDW_DPN_HCTRL_B0(t_params->port_num);
++		offsetctrl2 = SDW_DPN_OFFSETCTRL2_B0(t_params->port_num);
++	}
++
++	if (registers & SDW_DPN_SIMPLE_TRANSPORT_BLOCKCTRL3) {
++		ret = sdw_write_no_pm(slave, blockctrl3, t_params->blk_pkg_mode);
++		if (ret < 0)
++			return ret;
++	}
++
++	if (registers & SDW_DPN_SIMPLE_TRANSPORT_SAMPLECTRL2) {
++		wbuf = FIELD_GET(SDW_DPN_SAMPLECTRL_HIGH,
++				 t_params->sample_interval - 1);
++		ret = sdw_write_no_pm(slave, samplectrl2, wbuf);
++		if (ret < 0)
++			return ret;
++	}
++
++	if (registers & SDW_DPN_SIMPLE_TRANSPORT_HCTRL) {
++		wbuf = FIELD_PREP(SDW_DPN_HCTRL_HSTART, t_params->hstart);
++		wbuf |= FIELD_PREP(SDW_DPN_HCTRL_HSTOP, t_params->hstop);
++		ret = sdw_write_no_pm(slave, hctrl, wbuf);
++		if (ret < 0)
++			return ret;
++	}
++
++	if (registers & SDW_DPN_SIMPLE_TRANSPORT_OFFSETCTRL2) {
++		ret = sdw_write_no_pm(slave, offsetctrl2, t_params->offset2);
++		if (ret < 0)
++			return ret;
++	}
++
++	return 0;
++}
++
++static void sdw_apply_slave_transport_overrides(struct sdw_port_runtime *p_rt)
++{
++	if (p_rt->transport_params_override_mask &
++	    SDW_PORT_CONFIG_OVERRIDE_OFFSET1)
++		p_rt->transport_params.offset1 =
++			p_rt->transport_params_override.offset1;
++}
++
+ static int _sdw_program_slave_port_params(struct sdw_bus *bus,
+ 					  struct sdw_slave *slave,
+ 					  struct sdw_transport_params *t_params,
+@@ -137,6 +196,7 @@ static int sdw_program_slave_port_params(struct sdw_bus *bus,
+ 	struct sdw_slave_prop *slave_prop = &s_rt->slave->prop;
+ 	u32 addr1, addr2, addr3, addr4, addr5, addr6;
+ 	enum sdw_dpn_type port_type;
++	u32 simple_transport_registers = 0;
+ 	bool read_only_wordlength;
+ 	int ret;
+ 	u8 wbuf;
+@@ -144,6 +204,12 @@ static int sdw_program_slave_port_params(struct sdw_bus *bus,
+ 	if (s_rt->slave->is_mockup_device)
+ 		return 0;
+ 
++	/* Bus compute_params() establishes the common master schedule. Apply
++	 * explicitly requested slave-only deltas immediately before the slave is
++	 * programmed so master transport state remains shared.
++	 */
++	sdw_apply_slave_transport_overrides(p_rt);
++
+ 	if (t_params->port_num) {
+ 		struct sdw_dpn_prop *dpn_prop;
+ 
+@@ -154,6 +220,7 @@ static int sdw_program_slave_port_params(struct sdw_bus *bus,
+ 
+ 		read_only_wordlength = dpn_prop->read_only_wordlength;
+ 		port_type = dpn_prop->type;
++		simple_transport_registers = dpn_prop->simple_transport_registers;
+ 	} else {
+ 		read_only_wordlength = false;
+ 		port_type = SDW_DPN_FULL;
+@@ -239,7 +306,14 @@ static int sdw_program_slave_port_params(struct sdw_bus *bus,
+ 		}
+ 	}
+ 
+-	if (port_type != SDW_DPN_SIMPLE) {
++	if (port_type == SDW_DPN_SIMPLE && simple_transport_registers) {
++		ret = sdw_program_simple_ext(bus, s_rt->slave, t_params,
++					     simple_transport_registers);
++		if (ret < 0)
++			dev_err(&s_rt->slave->dev,
++				"Extended SIMPLE transport reg write failed for port: %d\n",
++				t_params->port_num);
++	} else if (port_type != SDW_DPN_SIMPLE) {
+ 		ret = _sdw_program_slave_port_params(bus, s_rt->slave,
+ 						     t_params, port_type);
+ 		if (ret < 0)
+@@ -983,6 +1057,10 @@ static int sdw_port_config(struct sdw_port_runtime *p_rt,
+ {
+ 	p_rt->ch_mask = port_config[port_index].ch_mask;
+ 	p_rt->num = port_config[port_index].num;
++	p_rt->transport_params_override_mask =
++		port_config[port_index].transport_params_override_mask;
++	p_rt->transport_params_override =
++		port_config[port_index].transport_params_override;
+ 
+ 	/*
+ 	 * TODO: Check port capabilities for requested configuration
+diff --git a/include/linux/soundwire/sdw.h b/include/linux/soundwire/sdw.h
+index 707ca6bd1..3976161b4 100644
+--- a/include/linux/soundwire/sdw.h
++++ b/include/linux/soundwire/sdw.h
+@@ -305,7 +305,14 @@ struct sdw_dp0_prop {
+  * @read_only_wordlength: Read Only wordlength field in DPN_BlockCtrl1 register
+  * @simple_ch_prep_sm: If the port supports simplified channel prepare state
+  * machine
++ * @simple_transport_registers: Optional banked transport registers implemented
++ * by a SIMPLE port in addition to the mandatory SIMPLE register set.
+  */
++#define SDW_DPN_SIMPLE_TRANSPORT_BLOCKCTRL3	BIT(0)
++#define SDW_DPN_SIMPLE_TRANSPORT_SAMPLECTRL2	BIT(1)
++#define SDW_DPN_SIMPLE_TRANSPORT_HCTRL		BIT(2)
++#define SDW_DPN_SIMPLE_TRANSPORT_OFFSETCTRL2	BIT(3)
++
+ struct sdw_dpn_prop {
+ 	u32 num;
+ 	u32 max_word;
+@@ -330,6 +337,7 @@ struct sdw_dpn_prop {
+ 	bool block_pack_mode;
+ 	bool read_only_wordlength;
+ 	bool simple_ch_prep_sm;
++	u32 simple_transport_registers;
+ };
+ 
+ /**
+@@ -904,10 +912,18 @@ void sdw_show_ping_status(struct sdw_bus *bus, bool sync_delay);
+  *
+  * @num: Port number
+  * @ch_mask: channels mask for port
++ * @transport_params_override_mask: Bitmask selecting slave transport fields
++ * which override values computed by the bus master. Master port parameters are
++ * never affected by these per-slave overrides.
++ * @transport_params_override: Values for the selected transport fields.
+  */
++#define SDW_PORT_CONFIG_OVERRIDE_OFFSET1	BIT(0)
++
+ struct sdw_port_config {
+ 	unsigned int num;
+ 	unsigned int ch_mask;
++	unsigned int transport_params_override_mask;
++	struct sdw_transport_params transport_params_override;
+ };
+ 
+ /**

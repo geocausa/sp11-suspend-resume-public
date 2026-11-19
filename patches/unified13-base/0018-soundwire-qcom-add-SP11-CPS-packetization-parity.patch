@@ -1,0 +1,72 @@
+From 677a38550e7d5d4128ba80da43b82562cc9ae55d Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 06:44:46 +0000
+Subject: [PATCH 18/47] soundwire: qcom: add SP11 CPS packetization parity
+
+Port the accepted Golden-v32 CPS controller route and DP13 PCM control
+programming onto v7.3. Keep the behavior behind the same SP11 module
+parameter used by the validated FullIO deployments for the first unified
+candidate.
+
+Historical source patch: 0071
+SHA-256: 2b5bac376782e0b62595cd4d1a705be910a8816b7bb5f948c39ea6b7de1c5ed8
+
+Signed-off-by: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+---
+ drivers/soundwire/qcom.c | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/drivers/soundwire/qcom.c b/drivers/soundwire/qcom.c
+index f6099c4d7..af3b50bed 100644
+--- a/drivers/soundwire/qcom.c
++++ b/drivers/soundwire/qcom.c
+@@ -135,6 +135,12 @@ module_param_named(sp11_feedback_active_offset2_zero,
+ MODULE_PARM_DESC(sp11_feedback_active_offset2_zero,
+ 		 "Clear WSA feedback ports 10/11/13 Offset2 only while enabling channels");
+ 
++/* SP11 accepted Windows WSA controller/CPS packetization state. */
++static bool sp11_cps_pcm_route_105c;
++module_param_named(sp11_cps_pcm_route_105c, sp11_cps_pcm_route_105c, bool, 0644);
++MODULE_PARM_DESC(sp11_cps_pcm_route_105c,
++		 "Program Windows WSA route 0x105c and CPS DP13 PCM control 0x1d54");
++
+ static bool qcom_swrm_is_sp11_feedback_port(unsigned int port_num)
+ {
+ 	return port_num == 10 || port_num == 11 || port_num == 13;
+@@ -1070,6 +1076,36 @@ static int qcom_swrm_transport_params(struct sdw_bus *bus,
+ 
+ 	pcfg = &ctrl->pconfig[params->port_num];
+ 
++	/*
++	 * Native Windows speaker start programs controller route 0x105c and
++	 * CPS DIN DP13 PCM control 0x1d54 before CPS feedback runs.
++	 */
++	if (sp11_cps_pcm_route_105c &&
++	    of_machine_is_compatible("microsoft,denali") &&
++	    bus->controller_id == MASTER_ID_WSA && params->port_num == 13) {
++		u32 route_old = 0;
++		u32 pcm_old = 0;
++		u32 pcm_reg = 0x1054 + params->port_num * 0x100;
++
++		ret = ctrl->reg_read(ctrl, 0x105c, &route_old);
++		if (ret)
++			goto err;
++		if (route_old != 0x0005000f) {
++			ret = ctrl->reg_write(ctrl, 0x105c, 0x0005000f);
++			if (ret)
++				goto err;
++		}
++		ret = ctrl->reg_read(ctrl, pcm_reg, &pcm_old);
++		if (ret)
++			goto err;
++		ret = ctrl->reg_write(ctrl, pcm_reg, 0x3);
++		dev_info(ctrl->dev,
++			 "SP11 CPS wake parity: bank=%u route_old=%#x route_new=0x5000f pcm_reg=%#x pcm_old=%#x pcm_new=0x3 ret=%d\n",
++			 bank, route_old, pcm_reg, pcm_old, ret);
++		if (ret)
++			goto err;
++	}
++
+ 	value = pcfg->off1 << SWRM_DP_PORT_CTRL_OFFSET1_SHFT;
+ 	value |= pcfg->off2 << SWRM_DP_PORT_CTRL_OFFSET2_SHFT;
+ 	value |= pcfg->si & 0xff;

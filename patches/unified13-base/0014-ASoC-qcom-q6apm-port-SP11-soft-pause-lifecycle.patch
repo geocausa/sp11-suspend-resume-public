@@ -1,0 +1,374 @@
+From eed375bed6cb2b97a3ff71db49e6d38a53153117 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 06:39:07 +0000
+Subject: [PATCH 14/47] ASoC: qcom: q6apm: port SP11 soft-pause lifecycle
+
+Adapt the accepted Windows soft-pause lifecycle to Linux v7.3 generic
+push/pull support. Register exact DSP pause/resume completion events and
+quiesce watermark callbacks before pause. Use the validated 3840-byte
+protected pull ring without reviving the older private pull-mode code.
+
+Signed-off-by: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+---
+ sound/soc/qcom/qdsp6/q6apm-dai.c | 129 +++++++++++++++++++++++++++++--
+ sound/soc/qcom/qdsp6/q6apm.c     |  85 +++++++++++++++++++-
+ sound/soc/qcom/qdsp6/q6apm.h     |   3 +
+ 3 files changed, 208 insertions(+), 9 deletions(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6apm-dai.c b/sound/soc/qcom/qdsp6/q6apm-dai.c
+index 033197bdd..fe4080ce3 100644
+--- a/sound/soc/qcom/qdsp6/q6apm-dai.c
++++ b/sound/soc/qcom/qdsp6/q6apm-dai.c
+@@ -30,6 +30,14 @@
+ #define CAPTURE_MIN_PERIOD_SIZE		6144
+ #define BUFFER_BYTES_MAX (PLAYBACK_MAX_NUM_PERIODS * PLAYBACK_MAX_PERIOD_SIZE)
+ #define BUFFER_BYTES_MIN (PLAYBACK_MIN_NUM_PERIODS * PLAYBACK_MIN_PERIOD_SIZE)
++#define SP11_PULL_PERIOD_BYTES	1920
++#define SP11_PULL_BUFFER_BYTES	3840
++#define SP11_SOFT_PAUSE_RAMPDOWN_MS		20
++#define SP11_SOFT_PAUSE_DOWNSTREAM_DELAY_MS	25
++#define SP11_SOFT_PAUSE_COMPLETION_MARGIN_MS	5
++#define SP11_SOFT_PAUSE_TIMEOUT_MS		\
++	(SP11_SOFT_PAUSE_RAMPDOWN_MS + SP11_SOFT_PAUSE_DOWNSTREAM_DELAY_MS + \
++	 SP11_SOFT_PAUSE_COMPLETION_MARGIN_MS)
+ #define COMPR_PLAYBACK_MAX_FRAGMENT_SIZE (128 * 1024)
+ #define COMPR_PLAYBACK_MAX_NUM_FRAGMENTS (16 * 4)
+ #define COMPR_PLAYBACK_MIN_FRAGMENT_SIZE (8 * 1024)
+@@ -81,6 +89,9 @@ struct q6apm_dai_rtd {
+ 	struct q6apm_graph *graph;
+ 	spinlock_t lock;
+ 	bool notify_on_drain;
++	bool soft_paused;
++	struct completion soft_pause_done;
++	struct completion soft_resume_done;
+ };
+ 
+ struct q6apm_dai_data {
+@@ -127,6 +138,29 @@ static const struct snd_pcm_hardware q6apm_dai_hardware_playback = {
+ 	.fifo_size =            0,
+ };
+ 
++static const struct snd_pcm_hardware q6apm_dai_hardware_sp11_pull = {
++	.info =			(SNDRV_PCM_INFO_MMAP |
++				 SNDRV_PCM_INFO_BLOCK_TRANSFER |
++				 SNDRV_PCM_INFO_MMAP_VALID |
++				 SNDRV_PCM_INFO_INTERLEAVED |
++				 SNDRV_PCM_INFO_PAUSE |
++				 SNDRV_PCM_INFO_RESUME |
++				 SNDRV_PCM_INFO_NO_REWINDS |
++				 SNDRV_PCM_INFO_SYNC_APPLPTR |
++				 SNDRV_PCM_INFO_BATCH),
++	.formats =		SNDRV_PCM_FMTBIT_S16_LE,
++	.rates =		SNDRV_PCM_RATE_48000,
++	.rate_min =		48000,
++	.rate_max =		48000,
++	.channels_min =		2,
++	.channels_max =		2,
++	.buffer_bytes_max =	SP11_PULL_BUFFER_BYTES,
++	.period_bytes_min =	SP11_PULL_PERIOD_BYTES,
++	.period_bytes_max =	SP11_PULL_PERIOD_BYTES,
++	.periods_min =		2,
++	.periods_max =		2,
++};
++
+ static void event_handler(uint32_t opcode, uint32_t token, void *payload, void *priv)
+ {
+ 	struct q6apm_dai_rtd *prtd = priv;
+@@ -134,7 +168,14 @@ static void event_handler(uint32_t opcode, uint32_t token, void *payload, void *
+ 
+ 	switch (opcode) {
+ 	case APM_CLIENT_EVENT_WATERMARK_EVENT:
+-		snd_pcm_period_elapsed(substream);
++		if (prtd->state == Q6APM_STREAM_RUNNING)
++			snd_pcm_period_elapsed(substream);
++		break;
++	case APM_CLIENT_EVENT_SOFT_PAUSE_COMPLETE:
++		complete(&prtd->soft_pause_done);
++		break;
++	case APM_CLIENT_EVENT_SOFT_RESUME_COMPLETE:
++		complete(&prtd->soft_resume_done);
+ 		break;
+ 	case APM_CLIENT_EVENT_CMD_EOS_DONE:
+ 		prtd->state = Q6APM_STREAM_STOPPED;
+@@ -239,7 +280,8 @@ static int q6apm_dai_prepare(struct snd_soc_component *component,
+ 	if (prtd->state) {
+ 		/* clear the previous setup if any  */
+ 		q6apm_graph_stop(prtd->graph);
+-		q6apm_free_fragments(prtd->graph, substream->stream);
++		if (!q6apm_is_graph_in_push_pull_mode(prtd->graph))
++			q6apm_free_fragments(prtd->graph, substream->stream);
+ 	}
+ 
+ 	prtd->last_pos_index = 0;
+@@ -335,26 +377,90 @@ static int q6apm_dai_ack(struct snd_soc_component *component, struct snd_pcm_sub
+ 	return ret;
+ }
+ 
++static int q6apm_dai_sp11_soft_pause(struct snd_soc_component *component,
++				     struct q6apm_dai_rtd *prtd, bool pause)
++{
++	struct completion *done = pause ? &prtd->soft_pause_done :
++					    &prtd->soft_resume_done;
++	unsigned long timeout;
++	int ret;
++
++	if (!q6apm_is_graph_in_push_pull_mode(prtd->graph) ||
++	    !audioreach_graph_has_protected_calibration(prtd->graph->info))
++		return -EOPNOTSUPP;
++
++	if (pause)
++		prtd->state = Q6APM_STREAM_STOPPED;
++
++	reinit_completion(done);
++	ret = q6apm_graph_sp11_soft_pause(prtd->graph, pause);
++	if (ret) {
++		if (pause)
++			prtd->state = Q6APM_STREAM_RUNNING;
++		return ret;
++	}
++
++	prtd->soft_paused = pause;
++	timeout = wait_for_completion_timeout(done,
++					      msecs_to_jiffies(SP11_SOFT_PAUSE_TIMEOUT_MS));
++	if (!timeout) {
++		dev_err(component->dev, "SP11 soft-%s completion timed out\n",
++			pause ? "pause" : "resume");
++		return -ETIMEDOUT;
++	}
++
++	return 0;
++}
++
+ static int q6apm_dai_trigger(struct snd_soc_component *component,
+ 			     struct snd_pcm_substream *substream, int cmd)
+ {
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	struct q6apm_dai_rtd *prtd = runtime->private_data;
++	bool sp11_pull = substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
++		q6apm_is_graph_in_push_pull_mode(prtd->graph) &&
++		audioreach_graph_has_protected_calibration(prtd->graph->info);
+ 	int ret = 0;
+ 
+ 	switch (cmd) {
+ 	case SNDRV_PCM_TRIGGER_START:
++		break;
+ 	case SNDRV_PCM_TRIGGER_RESUME:
+ 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
++		if (!sp11_pull || !prtd->soft_paused)
++			break;
++		ret = q6apm_dai_sp11_soft_pause(component, prtd, false);
++		if (ret == -EOPNOTSUPP) {
++			ret = 0;
++		} else if (!ret) {
++			prtd->soft_paused = false;
++			prtd->state = Q6APM_STREAM_RUNNING;
++		}
+ 		break;
+ 	case SNDRV_PCM_TRIGGER_STOP:
+-		/* TODO support be handled via SoftPause Module */
++		if (sp11_pull && prtd->soft_paused) {
++			ret = q6apm_dai_sp11_soft_pause(component, prtd, false);
++			if (ret == -EOPNOTSUPP)
++				ret = 0;
++			else if (!ret)
++				prtd->soft_paused = false;
++		}
+ 		prtd->state = Q6APM_STREAM_STOPPED;
+ 		prtd->queue_ptr = 0;
+ 		prtd->last_pos_index = 0;
+ 		break;
+ 	case SNDRV_PCM_TRIGGER_SUSPEND:
++		break;
+ 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
++		if (!sp11_pull || prtd->soft_paused)
++			break;
++		ret = q6apm_dai_sp11_soft_pause(component, prtd, true);
++		if (ret == -EOPNOTSUPP) {
++			ret = 0;
++		} else if (!ret) {
++			prtd->soft_paused = true;
++			prtd->state = Q6APM_STREAM_STOPPED;
++		}
+ 		break;
+ 	default:
+ 		ret = -EINVAL;
+@@ -388,6 +494,8 @@ static int q6apm_dai_open(struct snd_soc_component *component,
+ 		return -ENOMEM;
+ 
+ 	spin_lock_init(&prtd->lock);
++	init_completion(&prtd->soft_pause_done);
++	init_completion(&prtd->soft_resume_done);
+ 	prtd->substream = substream;
+ 	prtd->graph = q6apm_graph_open(dev, event_handler, prtd, graph_id, substream->stream);
+ 	if (IS_ERR(prtd->graph)) {
+@@ -396,10 +504,15 @@ static int q6apm_dai_open(struct snd_soc_component *component,
+ 		goto err;
+ 	}
+ 
+-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+-		runtime->hw = q6apm_dai_hardware_playback;
+-	else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		if (q6apm_is_graph_in_push_pull_mode(prtd->graph) &&
++		    audioreach_graph_has_protected_calibration(prtd->graph->info))
++			runtime->hw = q6apm_dai_hardware_sp11_pull;
++		else
++			runtime->hw = q6apm_dai_hardware_playback;
++	} else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
+ 		runtime->hw = q6apm_dai_hardware_capture;
++	}
+ 
+ 	/* Ensure that buffer size is a multiple of period size */
+ 	ret = snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
+@@ -408,7 +521,9 @@ static int q6apm_dai_open(struct snd_soc_component *component,
+ 		goto err;
+ 	}
+ 
+-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
++	    !(q6apm_is_graph_in_push_pull_mode(prtd->graph) &&
++	      audioreach_graph_has_protected_calibration(prtd->graph->info))) {
+ 		ret = snd_pcm_hw_constraint_minmax(runtime, SNDRV_PCM_HW_PARAM_BUFFER_BYTES,
+ 						   BUFFER_BYTES_MIN, BUFFER_BYTES_MAX);
+ 		if (ret < 0) {
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index 2c8ece609..d2b147424 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -31,6 +31,12 @@ struct apm_graph_mgmt_cmd {
+ #define Q6APM_OOB_BUFFER_SIZE	SZ_16K
+ #define Q6APM_DSP_SID_MASK	GENMASK(3, 0)
+ 
++/* Windows DEFAULT speaker soft-pause lifecycle, evidence-locked on SP11. */
++#define SP11_MODULE_ID_SOFT_PAUSE		0x07001019
++#define SP11_SOFT_PAUSE_IID			0x0000466b
++#define SP11_PARAM_SOFT_PAUSE_PAUSE		0x0800102e
++#define SP11_PARAM_SOFT_PAUSE_RESUME		0x0800102f
++
+ static struct q6apm *g_apm;
+ static bool sp11_vi_ready;
+ static bool sp11_cps_ready;
+@@ -815,7 +821,19 @@ static int graph_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ 		switch (event->event_id) {
+ 		case EVENT_ID_SH_MEM_PULL_PUSH_MODE_WATERMARK:
+ 			client_event = APM_CLIENT_EVENT_WATERMARK_EVENT;
+-			graph->cb(client_event, hdr->token, data->payload, graph->priv);
++			if (graph->cb)
++				graph->cb(client_event, hdr->token, data->payload,
++					  graph->priv);
++			break;
++		case EVENT_ID_SOFT_PAUSE_PAUSE_COMPLETE:
++			if (hdr->src_port == SP11_SOFT_PAUSE_IID && graph->cb)
++				graph->cb(APM_CLIENT_EVENT_SOFT_PAUSE_COMPLETE,
++					  hdr->token, data->payload, graph->priv);
++			break;
++		case EVENT_ID_SOFT_PAUSE_RESUME_COMPLETE:
++			if (hdr->src_port == SP11_SOFT_PAUSE_IID && graph->cb)
++				graph->cb(APM_CLIENT_EVENT_SOFT_RESUME_COMPLETE,
++					  hdr->token, data->payload, graph->priv);
+ 			break;
+ 		}
+ 
+@@ -902,10 +920,50 @@ static int graph_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ 	return 0;
+ }
+ 
++static int q6apm_register_module_event(struct q6apm_graph *graph, u32 iid,
++				       u32 event_id)
++{
++	struct apm_module_register_events *event;
++	size_t payload_size = ALIGN(sizeof(*event), 8);
++	void *p;
++
++	struct gpr_pkt *pkt __free(kfree) =
++		audioreach_alloc_cmd_pkt(payload_size, APM_CMD_REGISTER_MODULE_EVENTS,
++					 0, graph->port->id, iid);
++	if (IS_ERR(pkt))
++		return PTR_ERR(pkt);
++
++	p = (u8 *)pkt + GPR_HDR_SIZE + APM_CMD_HDR_SIZE;
++	memset(p, 0, payload_size);
++	event = p;
++	event->module_instance_id = iid;
++	event->event_id = event_id;
++	event->is_register = 1;
++
++	return audioreach_graph_send_cmd_sync(graph, pkt, 0);
++}
++
+ int q6apm_register_watermark_event(struct q6apm_graph *graph, int water_mark_level_bytes,
+ 				   int num_levels)
+ {
+-	return audioreach_shmem_register_event(graph, water_mark_level_bytes, num_levels);
++	struct audioreach_module *pause;
++	int ret;
++
++	ret = audioreach_shmem_register_event(graph, water_mark_level_bytes, num_levels);
++	if (ret || !audioreach_graph_has_protected_calibration(graph->info))
++		return ret;
++
++	pause = q6apm_find_module_by_mid(graph, SP11_MODULE_ID_SOFT_PAUSE);
++	if (!pause || pause->instance_id != SP11_SOFT_PAUSE_IID)
++		return -ENODEV;
++
++	ret = q6apm_register_module_event(graph, pause->instance_id,
++					  EVENT_ID_SOFT_PAUSE_PAUSE_COMPLETE);
++	if (ret)
++		return ret;
++
++	return q6apm_register_module_event(graph, pause->instance_id,
++				   EVENT_ID_SOFT_PAUSE_RESUME_COMPLETE);
+ }
+ EXPORT_SYMBOL_GPL(q6apm_register_watermark_event);
+ 
+@@ -1077,6 +1135,29 @@ int q6apm_graph_flush(struct q6apm_graph *graph)
+ }
+ EXPORT_SYMBOL_GPL(q6apm_graph_flush);
+ 
++int q6apm_graph_sp11_soft_pause(struct q6apm_graph *graph, bool pause)
++{
++	struct audioreach_module *module;
++	struct apm_module_param_data param = { 0 };
++
++	if (!graph || !q6apm_is_graph_in_push_pull_mode(graph) || !graph->ar_graph)
++		return -EOPNOTSUPP;
++	if (!audioreach_graph_has_protected_calibration(graph->info))
++		return -EOPNOTSUPP;
++
++	module = q6apm_find_module_by_mid(graph, SP11_MODULE_ID_SOFT_PAUSE);
++	if (!module || module->instance_id != SP11_SOFT_PAUSE_IID)
++		return -EOPNOTSUPP;
++
++	param.module_instance_id = module->instance_id;
++	param.param_id = pause ? SP11_PARAM_SOFT_PAUSE_PAUSE :
++				 SP11_PARAM_SOFT_PAUSE_RESUME;
++	param.param_size = 0;
++
++	return q6apm_send_inband_config(graph->ar_graph, &param, sizeof(param));
++}
++EXPORT_SYMBOL_GPL(q6apm_graph_sp11_soft_pause);
++
+ static int q6apm_audio_probe(struct snd_soc_component *component)
+ {
+ 	return audioreach_tplg_init(component);
+diff --git a/sound/soc/qcom/qdsp6/q6apm.h b/sound/soc/qcom/qdsp6/q6apm.h
+index 91a59bf67..e6f3e1d99 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.h
++++ b/sound/soc/qcom/qdsp6/q6apm.h
+@@ -42,6 +42,8 @@
+ #define APM_CLIENT_EVENT_DATA_WRITE_DONE	0x1009
+ #define APM_CLIENT_EVENT_DATA_READ_DONE		0x100a
+ #define APM_CLIENT_EVENT_WATERMARK_EVENT	0x100b
++#define APM_CLIENT_EVENT_SOFT_PAUSE_COMPLETE	0x100c
++#define APM_CLIENT_EVENT_SOFT_RESUME_COMPLETE	0x100d
+ #define APM_WRITE_TOKEN_MASK                   GENMASK(15, 0)
+ #define APM_WRITE_TOKEN_LEN_MASK               GENMASK(31, 16)
+ #define APM_WRITE_TOKEN_LEN_SHIFT              16
+@@ -128,6 +130,7 @@ int q6apm_graph_prepare(struct q6apm_graph *graph);
+ int q6apm_graph_start(struct q6apm_graph *graph);
+ int q6apm_graph_stop(struct q6apm_graph *graph);
+ int q6apm_graph_flush(struct q6apm_graph *graph);
++int q6apm_graph_sp11_soft_pause(struct q6apm_graph *graph, bool pause);
+ 
+ /* Media Format */
+ int q6apm_graph_media_format_pcm(struct q6apm_graph *graph,

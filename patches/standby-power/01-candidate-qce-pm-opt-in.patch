@@ -1,0 +1,99 @@
+From b52c5534adc62d62aef95783137ba611b8342af1 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 09:33:08 +0000
+Subject: [PATCH] crypto: qce: backport opt-in algorithms for runtime PM
+ binding
+
+Backport the default-off registration and Kconfig buildability changes
+from Bartosz Golaszewski's 2026-10-22 v11 two-patch series. The source
+blobs match the published preimages and resulting blobs exactly. Keep
+cryptographic algorithm registration disabled by default while allowing
+the driver to bind and release interconnect startup floors.
+
+The upstream self-test series is not included and algorithms are not
+qualified for opt-in use. The local candidate policy explicitly sets
+do_register_algos=0. Private kernel configuration selects the module
+instead of changing upstream defconfigs.
+
+Link: https://lkml.iu.edu/hypermail/linux/kernel/2610.2/15659.html
+Link: https://lkml.iu.edu/hypermail/linux/kernel/2610.2/15655.html
+---
+ drivers/crypto/Kconfig    | 22 +++++++++++++---------
+ drivers/crypto/qce/core.c | 12 +++++++++---
+ 2 files changed, 22 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/crypto/Kconfig b/drivers/crypto/Kconfig
+index 0189dfdcb..adcbe1585 100644
+--- a/drivers/crypto/Kconfig
++++ b/drivers/crypto/Kconfig
+@@ -527,17 +527,21 @@ source "drivers/crypto/marvell/Kconfig"
+ source "drivers/crypto/intel/Kconfig"
+ 
+ config CRYPTO_DEV_QCE
+-	tristate "Qualcomm crypto engine accelerator"
+-	depends on (BROKEN && ARCH_QCOM) || COMPILE_TEST
++	tristate "Qualcomm crypto engine offloader"
++	depends on ARCH_QCOM || COMPILE_TEST
+ 	depends on HAS_IOMEM
+ 	help
+-	  This driver supports Qualcomm crypto engine accelerator
+-	  hardware. To compile this driver as a module, choose M here. The
+-	  module will be called qcrypto.
+-
+-	  This driver does not have exclusive access to the
+-	  hardware, causing races with the secure world.  It
+-	  is also slower than the CPU.
++	  This driver supports Qualcomm crypto engine offloader hardware. To
++	  compile this driver as a module, choose M here. The module will be
++	  called qcrypto.
++
++	  NOTE: With qcrypto.do_register_algos module parameter set to true,
++	  this driver does not have exclusive access to the hardware, and may
++	  cause races with the secure world. It is also *slower* than the
++	  CPU for the same algorithms. By default it will not register crypto
++	  algorithms and only scale down the interconnect bandwidth and disable
++	  the relevant clocks. Use qcrypto.do_register_algos=1 at your own
++	  risk!
+ 
+ config CRYPTO_DEV_QCE_SKCIPHER
+ 	bool
+diff --git a/drivers/crypto/qce/core.c b/drivers/crypto/qce/core.c
+index bf3c1bc3b..5b1bf7a50 100644
+--- a/drivers/crypto/qce/core.c
++++ b/drivers/crypto/qce/core.c
+@@ -10,6 +10,7 @@
+ #include <linux/interconnect.h>
+ #include <linux/interrupt.h>
+ #include <linux/module.h>
++#include <linux/moduleparam.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm.h>
+ #include <linux/pm_runtime.h>
+@@ -22,6 +23,9 @@
+ #include "sha.h"
+ #include "aead.h"
+ 
++static bool do_register_algos;
++module_param(do_register_algos, bool, 0444);
++
+ #define QCE_QUEUE_LENGTH	1
+ 
+ #define QCE_DEFAULT_MEM_BANDWIDTH	393600
+@@ -259,9 +263,11 @@ static int qce_crypto_probe(struct platform_device *pdev)
+ 	qce->async_req_enqueue = qce_async_request_enqueue;
+ 	qce->async_req_done = qce_async_request_done;
+ 
+-	ret = devm_qce_register_algs(qce);
+-	if (ret)
+-		return ret;
++	if (do_register_algos) {
++		ret = devm_qce_register_algs(qce);
++		if (ret)
++			return ret;
++	}
+ 
+ 	/* Configure autosuspend after successful init */
+ 	pm_runtime_set_autosuspend_delay(dev, 100);
+-- 
+2.55.0
+

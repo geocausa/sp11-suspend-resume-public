@@ -1,0 +1,108 @@
+From dd3313e11fb40448cf9abcff747d72c659d3b9cc Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 18:38:56 +0000
+Subject: [PATCH 32/47] dmaengine: qcom: serialize SP11 QSPI descriptor
+ completion
+
+The Unified8 hardware run hit dma_cookie_complete()'s BUG_ON() after touch became active. The SP11 QSPI completion paths completed the virt-dma cookie before removing the descriptor from desc_issued, leaving a window where a late or nested completion could observe the same descriptor with cookie zero.\n\nFor QSPI only, claim completion under vc.lock: validate the cookie, complete it, and remove the descriptor from the issued list atomically before invoking the client callback. Keep non-QSPI GPI behavior unchanged and log/refuse any duplicate QSPI completion instead of panicking.
+---
+ drivers/dma/qcom/gpi.c | 57 +++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 51 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/dma/qcom/gpi.c b/drivers/dma/qcom/gpi.c
+index 738c83d24..29ac1ae29 100644
+--- a/drivers/dma/qcom/gpi.c
++++ b/drivers/dma/qcom/gpi.c
+@@ -585,6 +585,38 @@ static inline void *to_virtual(const struct gpi_ring *const ring, phys_addr_t ad
+ 	return ring->base + (addr - ring->phys_addr);
+ }
+ 
++/*
++ * QSPI completion can arrive through the deferred QUP-notification path or a
++ * direct transfer event.  Make ownership of the virt-dma descriptor atomic:
++ * once its cookie is completed it must no longer remain visible on the issued
++ * list.  Otherwise a nested/late completion can observe the same descriptor
++ * with cookie == 0 and trip dma_cookie_complete()'s BUG_ON().
++ */
++static bool gpi_qspi_claim_completion(struct gchan *gchan,
++				      struct virt_dma_desc *vd,
++				      const char *origin)
++{
++	struct gpii *gpii = gchan->gpii;
++	dma_cookie_t cookie;
++	unsigned long flags;
++
++	spin_lock_irqsave(&gchan->vc.lock, flags);
++	cookie = vd->tx.cookie;
++	if (unlikely(cookie < DMA_MIN_COOKIE)) {
++		spin_unlock_irqrestore(&gchan->vc.lock, flags);
++		dev_err_ratelimited(gpii->gpi_dev->dev,
++				    "SP11 QSPI blocked duplicate completion origin:%s chid:%u cookie:%d\n",
++				    origin, gchan->chid, cookie);
++		return false;
++	}
++
++	dma_cookie_complete(&vd->tx);
++	list_del(&vd->node);
++	spin_unlock_irqrestore(&gchan->vc.lock, flags);
++
++	return true;
++}
++
+ static void gpi_qspi_complete_deferred(struct gpii *gpii,
+ 				       struct qup_notif_event *notif)
+ {
+@@ -592,7 +624,6 @@ static void gpi_qspi_complete_deferred(struct gpii *gpii,
+ 	struct gchan *gchan = gpii->qspi_deferred_gchan;
+ 	struct gpi_desc *gpi_desc;
+ 	struct dmaengine_result result = gpii->qspi_deferred_result;
+-	unsigned long flags;
+ 
+ 	if (!vd || !gchan)
+ 		return;
+@@ -612,12 +643,10 @@ static void gpi_qspi_complete_deferred(struct gpii *gpii,
+ 			 "SP11 QSPI completing TX-only descriptor after grace period residue:%u\n",
+ 			 result.residue);
+ 
+-	dma_cookie_complete(&vd->tx);
+-	dmaengine_desc_get_callback_invoke(&vd->tx, &result);
++	if (!gpi_qspi_claim_completion(gchan, vd, "deferred"))
++		return;
+ 
+-	spin_lock_irqsave(&gchan->vc.lock, flags);
+-	list_del(&vd->node);
+-	spin_unlock_irqrestore(&gchan->vc.lock, flags);
++	dmaengine_desc_get_callback_invoke(&vd->tx, &result);
+ 	kfree(gpi_desc);
+ }
+ 
+@@ -1064,6 +1093,14 @@ static void gpi_process_imed_data_event(struct gchan *gchan,
+ 		result.result = DMA_TRANS_NOERROR;
+ 	result.residue = gpi_desc->len - imed_event->length;
+ 
++	if (gchan->protocol == QCOM_GPI_QSPI) {
++		if (!gpi_qspi_claim_completion(gchan, vd, "immediate"))
++			return;
++		dmaengine_desc_get_callback_invoke(&vd->tx, &result);
++		kfree(gpi_desc);
++		return;
++	}
++
+ 	dma_cookie_complete(&vd->tx);
+ 	dmaengine_desc_get_callback_invoke(&vd->tx, &result);
+ 
+@@ -1215,6 +1252,14 @@ static void gpi_process_xfer_compl_event(struct gchan *gchan,
+ 		return;
+ 	}
+ 
++	if (gchan->protocol == QCOM_GPI_QSPI) {
++		if (!gpi_qspi_claim_completion(gchan, vd, "xfer"))
++			return;
++		dmaengine_desc_get_callback_invoke(&vd->tx, &result);
++		kfree(gpi_desc);
++		return;
++	}
++
+ 	dma_cookie_complete(&vd->tx);
+ 	dmaengine_desc_get_callback_invoke(&vd->tx, &result);
+ 

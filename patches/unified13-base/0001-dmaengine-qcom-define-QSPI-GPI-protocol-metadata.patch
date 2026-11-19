@@ -1,0 +1,37 @@
+From 5cbd5db705331030fa55cf099b7bb6a9a9d38315 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 20:56:26 +0000
+Subject: [PATCH 01/47] dmaengine: qcom: define QSPI GPI protocol metadata
+
+---
+ include/dt-bindings/dma/qcom-gpi.h | 1 +
+ include/linux/dma/qcom-gpi-dma.h   | 2 ++
+ 2 files changed, 3 insertions(+)
+
+diff --git a/include/dt-bindings/dma/qcom-gpi.h b/include/dt-bindings/dma/qcom-gpi.h
+index ebda2a37f..373ef65f9 100644
+--- a/include/dt-bindings/dma/qcom-gpi.h
++++ b/include/dt-bindings/dma/qcom-gpi.h
+@@ -7,5 +7,6 @@
+ #define QCOM_GPI_SPI		1
+ #define QCOM_GPI_UART		2
+ #define QCOM_GPI_I2C		3
++#define QCOM_GPI_QSPI		4
+ 
+ #endif /* __DT_BINDINGS_DMA_QCOM_GPI_H__ */
+diff --git a/include/linux/dma/qcom-gpi-dma.h b/include/linux/dma/qcom-gpi-dma.h
+index 332be2842..4480c021b 100644
+--- a/include/linux/dma/qcom-gpi-dma.h
++++ b/include/linux/dma/qcom-gpi-dma.h
+@@ -33,9 +33,11 @@ enum spi_transfer_cmd {
+  * @cs: chip select toggle
+  * @set_config: set peripheral config
+  * @rx_len: receive length for buffer
++ * @qspi: use QSPI transfer-ring encoding
+  */
+ struct gpi_spi_config {
+ 	u8 set_config;
++	u8 qspi;
+ 	u8 loopback_en;
+ 	u8 clock_pol_high;
+ 	u8 data_pol_high;

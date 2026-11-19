@@ -1,0 +1,92 @@
+From e8ceea84ec1d914c3fc813f0b0f4c9e8c95b9a7f Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 19:13:56 +0000
+Subject: [PATCH 34/47] ASoC: lpass-wsa-macro: retain Denali producer clock
+ votes
+
+The recovered7.1 producer held macro and dcodec enabled until removal, runtime-gating only mclk, npl and fsgen with a3s autosuspend delay. Preserve that board-specific retention with managed lifetime votes and separately owned PM-clock references. Keep other boards on the upstream all-clock list and100ms delay. Candidate physical acceptance remains pending.
+---
+ sound/soc/codecs/lpass-wsa-macro.c | 55 +++++++++++++++++++++++++++---
+ 1 file changed, 51 insertions(+), 4 deletions(-)
+
+diff --git a/sound/soc/codecs/lpass-wsa-macro.c b/sound/soc/codecs/lpass-wsa-macro.c
+index fb13949d2..d64f1913e 100644
+--- a/sound/soc/codecs/lpass-wsa-macro.c
++++ b/sound/soc/codecs/lpass-wsa-macro.c
+@@ -2919,9 +2919,26 @@ static const struct snd_soc_component_driver wsa_macro_component_drv = {
+ 	.num_dapm_routes = ARRAY_SIZE(wsa_audio_map),
+ };
+ 
++static void wsa_macro_disable_retained_clock(void *clock)
++{
++	clk_disable_unprepare(clock);
++}
++
++static int wsa_macro_enable_retained_clock(struct device *dev, struct clk *clock)
++{
++	int ret;
++
++	ret = clk_prepare_enable(clock);
++	if (ret)
++		return ret;
++
++	return devm_add_action_or_reset(dev, wsa_macro_disable_retained_clock, clock);
++}
++
+ static int wsa_macro_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
++	bool retain_clocks = of_machine_is_compatible("microsoft,denali");
+ 	struct wsa_macro *wsa;
+ 	kernel_ulong_t flags;
+ 	void __iomem *base;
+@@ -3024,15 +3041,45 @@ static int wsa_macro_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * The accepted Denali producer keeps macro/dcodec resident across
++	 * runtime clock-stop. Only mclk, npl and fsgen were runtime-gated in
++	 * that lifecycle. Preserve those clock votes independently of the PM
++	 * clock list; other boards retain the upstream all-clock policy.
++	 */
++	if (retain_clocks) {
++		ret = wsa_macro_enable_retained_clock(dev, wsa->macro);
++		if (ret)
++			return ret;
++		ret = wsa_macro_enable_retained_clock(dev, wsa->dcodec);
++		if (ret)
++			return ret;
++	}
++
+ 	ret = devm_pm_clk_create(dev);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = of_pm_clk_add_clks(dev);
+-	if (ret < 0)
+-		return ret;
++	if (retain_clocks) {
++		/* pm_clk_add acquires its own references for pm_clk_destroy. */
++		ret = pm_clk_add(dev, "mclk");
++		if (ret)
++			return ret;
++		if (wsa->npl) {
++			ret = pm_clk_add(dev, "npl");
++			if (ret)
++				return ret;
++		}
++		ret = pm_clk_add(dev, "fsgen");
++		if (ret)
++			return ret;
++	} else {
++		ret = of_pm_clk_add_clks(dev);
++		if (ret < 0)
++			return ret;
++	}
+ 
+-	pm_runtime_set_autosuspend_delay(dev, 100);
++	pm_runtime_set_autosuspend_delay(dev, retain_clocks ? 3000 : 100);
+ 	pm_runtime_use_autosuspend(dev);
+ 	ret = devm_pm_runtime_enable(dev);
+ 	if (ret)

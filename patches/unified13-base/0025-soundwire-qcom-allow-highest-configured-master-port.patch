@@ -1,0 +1,35 @@
+From 8402d139d91a5ea969b1ee7692e7b59204018fa8 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:49:32 +0000
+Subject: [PATCH 25/47] soundwire: qcom: allow highest configured master port
+
+Qualcomm SoundWire port configuration is indexed from 1 through nports,
+and pconfig is allocated with nports + 1 entries. An explicit slave
+master-port mapping equal to nports is therefore valid.
+
+The SP11 Golden-v32 protected speaker path relies on this for CPS feedback
+on WSA master DP13 with a 9-DOUT + 4-DIN controller. The v7.3 rebase
+accidentally restored the upstream >= check and rejected DP13 as
+"All ports busy".
+
+Restore the hardware-validated Golden bound check without changing generic
+dynamic allocation semantics.
+
+Signed-off-by: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+---
+ drivers/soundwire/qcom.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/soundwire/qcom.c b/drivers/soundwire/qcom.c
+index af3b50bed..4e528b8e2 100644
+--- a/drivers/soundwire/qcom.c
++++ b/drivers/soundwire/qcom.c
+@@ -1356,7 +1356,7 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
+ 				else
+ 					pn = find_first_zero_bit(port_mask, maxport);
+ 
+-				if (pn >= maxport) {
++				if (pn > maxport) {
+ 					dev_err(ctrl->dev, "All ports busy\n");
+ 					return -EBUSY;
+ 				}

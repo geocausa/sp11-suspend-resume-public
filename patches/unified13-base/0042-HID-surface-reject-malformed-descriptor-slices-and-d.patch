@@ -1,0 +1,46 @@
+From 19cfc1d967e489c59af96625071d9092f2cc493a Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 07:40:34 +0000
+Subject: [PATCH 42/47] HID: surface: reject malformed descriptor slices and
+ decline absent interfaces
+
+---
+ drivers/hid/surface-hid/surface_hid.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/drivers/hid/surface-hid/surface_hid.c b/drivers/hid/surface-hid/surface_hid.c
+index eae47e0d9..338021e21 100644
+--- a/drivers/hid/surface-hid/surface_hid.c
++++ b/drivers/hid/surface-hid/surface_hid.c
+@@ -75,6 +75,8 @@ static int ssam_hid_get_descriptor(struct surface_hid_device *shid, u8 entry, u8
+ 	length = buffer_len;
+ 
+ 	while (!slice->end && offset < len) {
++		u32 requested_offset = offset;
++
+ 		put_unaligned_le32(offset, &slice->offset);
+ 		put_unaligned_le32(length, &slice->length);
+ 
+@@ -85,9 +87,22 @@ static int ssam_hid_get_descriptor(struct surface_hid_device *shid, u8 entry, u8
+ 		if (status)
+ 			return status;
+ 
++		if (rsp.length < sizeof(*slice))
++			return -EPROTO;
++
+ 		offset = get_unaligned_le32(&slice->offset);
+ 		length = get_unaligned_le32(&slice->length);
+ 
++		/* A terminated, empty first reply advertises no descriptor. */
++		if (!requested_offset && !offset && !length && slice->end == 0xff &&
++		    rsp.length == sizeof(*slice))
++			return -ENODEV;
++
++		/* Do not copy beyond the actual reply or retry without progress. */
++		if (length > rsp.length - sizeof(*slice) ||
++		    (!length && !slice->end))
++			return -EPROTO;
++
+ 		/* Don't mess stuff up in case we receive garbage. */
+ 		if (length > buffer_len || offset > len)
+ 			return -EPROTO;

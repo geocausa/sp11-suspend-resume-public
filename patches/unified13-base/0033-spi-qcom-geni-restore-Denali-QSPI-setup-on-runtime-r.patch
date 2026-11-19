@@ -1,0 +1,49 @@
+From ffea003dfcdc165c9cde8757c74ee3e68d368746 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 19:13:56 +0000
+Subject: [PATCH 33/47] spi: qcom-geni: restore Denali QSPI setup on runtime
+ resume
+
+Reapply the existing protocol9 SE setup after resources and OPP are restored, before the next message. Keep the existing queue, GPI rings, callbacks and timeout budgets. Include paired-transfer errors in the existing register tracepoint.
+---
+ drivers/spi/spi-geni-qcom.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/spi/spi-geni-qcom.c b/drivers/spi/spi-geni-qcom.c
+index de42d14f7..a99176de4 100644
+--- a/drivers/spi/spi-geni-qcom.c
++++ b/drivers/spi/spi-geni-qcom.c
+@@ -669,6 +669,7 @@ static int spi_geni_sp11_qspi_submit_read_pair(struct spi_controller *spi,
+ 					      msecs_to_jiffies(500));
+ 	if (!timeout) {
+ 		dev_err(&msg->spi->dev, "SPI RX transfer timed out\n");
++		trace_geni_se_regs(&mas->se);
+ 		goto timeout;
+ 	}
+ 
+@@ -676,6 +677,7 @@ static int spi_geni_sp11_qspi_submit_read_pair(struct spi_controller *spi,
+ 	if (!wait_for_completion_timeout(&pair.tx_done, timeout)) {
+ 		dev_err(&msg->spi->dev,
+ 			"SPI TX transfer timed out after RX completion\n");
++		trace_geni_se_regs(&mas->se);
+ 		goto timeout;
+ 	}
+ 
+@@ -1623,8 +1625,15 @@ static int spi_geni_runtime_resume(struct device *dev)
+ 			return ret;
+ 	}
+ 
+-	if (mas->se.has_opp)
+-		return dev_pm_opp_set_rate(mas->dev, mas->cur_sclk_hz);
++	if (mas->se.has_opp) {
++		ret = dev_pm_opp_set_rate(mas->dev, mas->cur_sclk_hz);
++		if (ret)
++			return ret;
++	}
++
++	/* Restore the QSPI completion routing after resource gating. */
++	if (spi_geni_is_sp11_qspi(mas) && mas->cur_xfer_mode == GENI_GPI_DMA)
++		spi_geni_sp11_qspi_prepare_hw(mas);
+ 
+ 	return 0;
+ }

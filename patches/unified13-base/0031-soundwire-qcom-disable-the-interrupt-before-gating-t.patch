@@ -1,0 +1,38 @@
+From 1feb03b00c07ce83e167aea279894fd9aa12e3dc Mon Sep 17 00:00:00 2001
+From: Oleg Keri <okerixx@gmail.com>
+Date: Thu, 29 Oct 2026 02:46:12 +0000
+Subject: [PATCH 31/47] soundwire: qcom: disable the interrupt before gating
+ the clock
+
+swrm_runtime_suspend() can gate hclk while the ClockStopNow interrupt thread still clears status and handles CLK_STOP_FINISHED. On X1E80100 this can corrupt the next clock-stop exit and leave speaker peripherals detached. Disable the main controller IRQ before hclk is gated and re-enable it immediately after hclk returns.
+
+Backport of upstream v2 posting Message-ID: <20261009082639.22662-1-okerixx@gmail.com>
+
+Fixes: 74e79da9fd46 ("soundwire: qcom: add runtime pm support")
+
+Signed-off-by: Oleg Keri <okerixx@gmail.com>
+Signed-off-by: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+---
+ drivers/soundwire/qcom.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/soundwire/qcom.c b/drivers/soundwire/qcom.c
+index 4e528b8e2..611e61999 100644
+--- a/drivers/soundwire/qcom.c
++++ b/drivers/soundwire/qcom.c
+@@ -1838,6 +1838,7 @@ static int __maybe_unused swrm_runtime_resume(struct device *dev)
+ 	}
+ 
+ 	clk_prepare_enable(ctrl->hclk);
++	enable_irq(ctrl->irq);
+ 
+ 	if (ctrl->clock_stop_not_supported) {
+ 		reinit_completion(&ctrl->enumeration);
+@@ -1921,6 +1922,7 @@ static int __maybe_unused swrm_runtime_suspend(struct device *dev)
+ 		}
+ 	}
+ 
++	disable_irq(ctrl->irq);
+ 	clk_disable_unprepare(ctrl->hclk);
+ 
+ 	usleep_range(300, 305);

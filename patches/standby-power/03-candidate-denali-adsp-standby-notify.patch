@@ -1,0 +1,212 @@
+diff --git a/Documentation/devicetree/bindings/remoteproc/qcom,pas-common.yaml b/Documentation/devicetree/bindings/remoteproc/qcom,pas-common.yaml
+index 11faf65..13d99cf 100644
+--- a/Documentation/devicetree/bindings/remoteproc/qcom,pas-common.yaml
++++ b/Documentation/devicetree/bindings/remoteproc/qcom,pas-common.yaml
+@@ -55,7 +55,7 @@ properties:
+           - description: Single bit index to toggle in the value sent to
+               the remote processor
+             maximum: 32
+-      - description: Ping the remoteproc
++      - description: Ping the remoteproc or notify it of application processor sleep
+         items:
+           - description: Phandle to the Shared Memory Point 2 Point device
+               handling the communication with a remote processor
+@@ -68,7 +68,7 @@ properties:
+     minItems: 1
+     items:
+       - const: stop
+-      - const: ping
++      - enum: [ping, sleepstate]
+ 
+   smd-edge:
+     $ref: /schemas/remoteproc/qcom,smd-edge.yaml#
+diff --git a/Documentation/devicetree/bindings/remoteproc/qcom,sm8550-pas.yaml b/Documentation/devicetree/bindings/remoteproc/qcom,sm8550-pas.yaml
+index c58e8a6..834a08d 100644
+--- a/Documentation/devicetree/bindings/remoteproc/qcom,sm8550-pas.yaml
++++ b/Documentation/devicetree/bindings/remoteproc/qcom,sm8550-pas.yaml
+@@ -100,11 +100,9 @@ properties:
+       - const: shutdown-ack
+ 
+   qcom,smem-states:
+-    maxItems: 1
+     description: States used by the AP to signal the Hexagon core
+ 
+   qcom,smem-state-names:
+-    maxItems: 1
+     description: The names of the state bits used for SMP2P output
+ 
+ required:
+@@ -114,6 +112,23 @@ required:
+ 
+ allOf:
+   - $ref: /schemas/remoteproc/qcom,pas-common.yaml#
++  - if:
++      properties:
++        compatible:
++          const: qcom,x1e80100-adsp-pas
++    then:
++      properties:
++        qcom,smem-state-names:
++          minItems: 1
++          items:
++            - const: stop
++            - const: sleepstate
++    else:
++      properties:
++        qcom,smem-states:
++          maxItems: 1
++        qcom,smem-state-names:
++          maxItems: 1
+   - if:
+       properties:
+         compatible:
+diff --git a/Documentation/devicetree/bindings/soc/qcom/qcom,smp2p.yaml b/Documentation/devicetree/bindings/soc/qcom/qcom,smp2p.yaml
+index f912768..00b3703 100644
+--- a/Documentation/devicetree/bindings/soc/qcom/qcom,smp2p.yaml
++++ b/Documentation/devicetree/bindings/soc/qcom/qcom,smp2p.yaml
+@@ -60,7 +60,7 @@ properties:
+       Two identifiers of the inbound and outbound smem items used for this edge.
+ 
+ patternProperties:
+-  "^master-kernel|slave-kernel|ipa-ap-to-modem|ipa-modem-to-ap|wlan-ap-to-wpss|wlan-wpss-to-ap$":
++  "^(master-kernel|slave-kernel|ipa-ap-to-modem|ipa-modem-to-ap|wlan-ap-to-wpss|wlan-wpss-to-ap|sleepstate)$":
+     type: object
+     description:
+       Each SMP2P pair contain a set of inbound and outbound entries, these are
+diff --git a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-denali-oled.dts b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-denali-oled.dts
+index 9cd4acf..45fe114 100644
+--- a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-denali-oled.dts
++++ b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-denali-oled.dts
+@@ -18,6 +18,18 @@
+ 	compatible = "samsung,atna30dw01", "samsung,atna33xc20";
+ };
+ 
++&{/smp2p-adsp} {
++	smp2p_adsp_sleep: sleepstate {
++		qcom,entry-name = "sleepstate";
++		#qcom,smem-state-cells = <1>;
++	};
++};
++
++&remoteproc_adsp {
++	qcom,smem-states = <&smp2p_adsp_out 0>, <&smp2p_adsp_sleep 12>;
++	qcom,smem-state-names = "stop", "sleepstate";
++};
++
+ &tcsr {
+ 	/* Let the provider publish a register-only map before its users. */
+ 	compatible = "qcom,x1e80100-tcsr";
+diff --git a/drivers/remoteproc/qcom_q6v5_pas.c b/drivers/remoteproc/qcom_q6v5_pas.c
+index a005546..a444be3 100644
+--- a/drivers/remoteproc/qcom_q6v5_pas.c
++++ b/drivers/remoteproc/qcom_q6v5_pas.c
+@@ -14,6 +14,7 @@
+ #include <linux/iommu.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/of_platform.h>
+@@ -28,6 +29,7 @@
+ #include <linux/soc/qcom/mdt_loader.h>
+ #include <linux/soc/qcom/smem.h>
+ #include <linux/soc/qcom/smem_state.h>
++#include <linux/suspend.h>
+ 
+ #include "qcom_common.h"
+ #include "qcom_pil_info.h"
+@@ -71,6 +73,9 @@ struct qcom_pas {
+ 	struct rproc *rproc;
+ 
+ 	struct qcom_q6v5 q6v5;
++	struct qcom_smem_state *sleep_state;
++	unsigned int sleep_bit;
++	bool sleep_notified;
+ 
+ 	struct clk *xo;
+ 	struct clk *aggre2_clk;
+@@ -883,6 +888,17 @@ static int qcom_pas_probe(struct platform_device *pdev)
+ 	}
+ 	platform_set_drvdata(pdev, pas);
+ 
++	if (of_property_match_string(pdev->dev.of_node, "qcom,smem-state-names",
++				     "sleepstate") >= 0) {
++		pas->sleep_state = devm_qcom_smem_state_get(pas->dev, "sleepstate",
++							   &pas->sleep_bit);
++		if (IS_ERR(pas->sleep_state))
++			return dev_err_probe(pas->dev, PTR_ERR(pas->sleep_state),
++					     "failed to get ADSP sleepstate\n");
++		if (pas->sleep_bit >= 32)
++			return dev_err_probe(pas->dev, -EINVAL, "invalid ADSP sleepstate bit\n");
++	}
++
+ 	ret = device_init_wakeup(pas->dev, true);
+ 	if (ret)
+ 		goto free_rproc;
+@@ -1912,12 +1928,65 @@ static const struct of_device_id qcom_pas_of_match[] = {
+ };
+ MODULE_DEVICE_TABLE(of, qcom_pas_of_match);
+ 
++static bool denali_adsp_sleep_notify;
++module_param(denali_adsp_sleep_notify, bool, 0600);
++MODULE_PARM_DESC(denali_adsp_sleep_notify, "Send the Denali ADSP standby notification during deep suspend");
++
++static int __maybe_unused qcom_pas_suspend_late(struct device *dev)
++{
++	struct qcom_pas *pas = dev_get_drvdata(dev);
++	int ret = 0;
++	u32 mask;
++
++	if (!READ_ONCE(denali_adsp_sleep_notify) || !pas->sleep_state ||
++	    pm_suspend_target_state != PM_SUSPEND_MEM)
++		return 0;
++	if (pas->sleep_notified)
++		return -EIO;
++
++	/* Audio releases its clock votes in regular device suspend. */
++	if (!mutex_trylock(&pas->rproc->lock))
++		return -EBUSY;
++
++	if (pas->rproc->state == RPROC_RUNNING) {
++		mask = BIT(pas->sleep_bit);
++		ret = qcom_smem_state_update_bits(pas->sleep_state, mask, mask);
++		if (!ret)
++			pas->sleep_notified = true;
++	}
++	mutex_unlock(&pas->rproc->lock);
++
++	return ret;
++}
++
++static int __maybe_unused qcom_pas_resume_early(struct device *dev)
++{
++	struct qcom_pas *pas = dev_get_drvdata(dev);
++	int ret;
++
++	if (!pas->sleep_notified)
++		return 0;
++
++	/* Restore the host state before clients resume, including on unwind. */
++	ret = qcom_smem_state_update_bits(pas->sleep_state, BIT(pas->sleep_bit), 0);
++	if (!ret)
++		pas->sleep_notified = false;
++
++	return ret;
++}
++
++static const struct dev_pm_ops qcom_pas_pm_ops = {
++	.suspend_late = pm_sleep_ptr(qcom_pas_suspend_late),
++	.resume_early = pm_sleep_ptr(qcom_pas_resume_early),
++};
++
+ static struct platform_driver qcom_pas_driver = {
+ 	.probe = qcom_pas_probe,
+ 	.remove = qcom_pas_remove,
+ 	.driver = {
+ 		.name = "qcom_q6v5_pas",
+ 		.of_match_table = qcom_pas_of_match,
++		.pm = pm_sleep_ptr(&qcom_pas_pm_ops),
+ 	},
+ };
+ 

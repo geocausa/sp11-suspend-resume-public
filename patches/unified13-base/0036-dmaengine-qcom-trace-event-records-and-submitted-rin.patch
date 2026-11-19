@@ -1,0 +1,118 @@
+From 38849a17743a561ec8512e4f01045c5bd5a20b94 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 21:28:00 +0000
+Subject: [PATCH 36/47] dmaengine: qcom: trace event records and submitted ring
+ boundaries
+
+---
+ drivers/dma/qcom/gpi.c          |  9 +++++
+ include/trace/events/qcom_gpi.h | 66 +++++++++++++++++++++++++++++++++
+ 2 files changed, 75 insertions(+)
+ create mode 100644 include/trace/events/qcom_gpi.h
+
+diff --git a/drivers/dma/qcom/gpi.c b/drivers/dma/qcom/gpi.c
+index 1da5386ce..60a3219b0 100644
+--- a/drivers/dma/qcom/gpi.c
++++ b/drivers/dma/qcom/gpi.c
+@@ -18,6 +18,9 @@
+ #include "../dmaengine.h"
+ #include "../virt-dma.h"
+ 
++#define CREATE_TRACE_POINTS
++#include <trace/events/qcom_gpi.h>
++
+ #define TRE_TYPE_DMA		0x10
+ #define TRE_TYPE_IMMEDIATE_DMA	0x11
+ #define TRE_TYPE_GO		0x20
+@@ -1290,6 +1293,9 @@ static void gpi_process_events(struct gpii *gpii)
+ 	do {
+ 		while (rp != ev_ring->rp) {
+ 			gpi_event = ev_ring->rp;
++			trace_gpi_event(gpii->gpii_id,
++					ev_ring->rp - ev_ring->base, cntxt_rp,
++					gpi_event->gpi_ere.dword);
+ 			chid = gpi_event->xfer_compl_event.chid;
+ 			type = gpi_event->xfer_compl_event.type;
+ 
+@@ -2185,6 +2191,9 @@ static void gpi_issue_pending(struct dma_chan *chan)
+ 	}
+ 
+ 	gpi_desc->db = ch_ring->wp;
++	trace_gpi_submit(gpii->gpii_id, gchan->chid, vd->tx.cookie,
++			ch_ring->phys_addr, to_physical(ch_ring, gpi_desc->db),
++			gpi_desc->len);
+ 	gpi_write_ch_db(gchan, &gchan->ch_ring, gpi_desc->db);
+ 	read_unlock_irqrestore(&gpii->pm_lock, pm_lock_flags);
+ }
+diff --git a/include/trace/events/qcom_gpi.h b/include/trace/events/qcom_gpi.h
+new file mode 100644
+index 000000000..479890a8c
+--- /dev/null
++++ b/include/trace/events/qcom_gpi.h
+@@ -0,0 +1,66 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM qcom_gpi
++
++#if !defined(_TRACE_QCOM_GPI_H) || defined(TRACE_HEADER_MULTI_READ)
++#define _TRACE_QCOM_GPI_H
++
++#include <linux/tracepoint.h>
++
++TRACE_EVENT(gpi_event,
++
++	TP_PROTO(u32 instance, u32 offset, u64 producer, const u32 *words),
++	TP_ARGS(instance, offset, producer, words),
++
++	TP_STRUCT__entry(
++		__field(u32, instance)
++		__field(u32, offset)
++		__field(u64, producer)
++		__array(u32, words, 4)
++	),
++
++	TP_fast_assign(
++		__entry->instance = instance;
++		__entry->offset = offset;
++		__entry->producer = producer;
++		memcpy(__entry->words, words, sizeof(__entry->words));
++	),
++
++	TP_printk("instance=%u offset=%u producer=%#llx event=%08x:%08x:%08x:%08x",
++		  __entry->instance, __entry->offset, __entry->producer,
++		  __entry->words[0], __entry->words[1],
++		  __entry->words[2], __entry->words[3])
++);
++
++TRACE_EVENT(gpi_submit,
++
++	TP_PROTO(u32 instance, u32 channel, int cookie, u64 base,
++		 u64 doorbell, u32 length),
++	TP_ARGS(instance, channel, cookie, base, doorbell, length),
++
++	TP_STRUCT__entry(
++		__field(u32, instance)
++		__field(u32, channel)
++		__field(int, cookie)
++		__field(u64, base)
++		__field(u64, doorbell)
++		__field(u32, length)
++	),
++
++	TP_fast_assign(
++		__entry->instance = instance;
++		__entry->channel = channel;
++		__entry->cookie = cookie;
++		__entry->base = base;
++		__entry->doorbell = doorbell;
++		__entry->length = length;
++	),
++
++	TP_printk("instance=%u channel=%u cookie=%d base=%#llx doorbell=%#llx length=%u",
++		  __entry->instance, __entry->channel, __entry->cookie,
++		  __entry->base, __entry->doorbell, __entry->length)
++);
++
++#endif /* _TRACE_QCOM_GPI_H */
++
++#include <trace/define_trace.h>

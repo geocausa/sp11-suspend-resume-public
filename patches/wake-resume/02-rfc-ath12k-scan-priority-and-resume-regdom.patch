@@ -1,0 +1,88 @@
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 18:45:00 +0000
+Subject: [PATCH RFC] wifi: ath12k: write scan_priority to WMI cmd and restore country code on resume
+
+STATUS: RFC / SOURCE-VERIFIED ONLY — NOT YET COMPILED OR HARDWARE-TESTED.
+
+On Surface Pro 11 (X1E80100 + WCN7850) running Linux 7.3 without WoWLAN,
+every suspend/resume cycle (and cold boot) exhibits a ~15.6 s initial scan
+before Wi-Fi authentication begins, followed by < 0.8 s auth/DHCP:
+
+  T =  0.00 s: firmware cold-boots, resets phy0 regdom to WORLD ("00"),
+               supplicant initiates 101-channel scan (2.4/5/6 GHz, passive)
+  T = +7.02 s: firmware 802.11d offload scan discovers local country ("GB")
+  T = +15.58 s: first scan finishes; auth + DHCP complete in 0.77 s
+
+Two driver issues in ath12k contribute directly:
+
+1. drivers/net/wireless/ath/ath12k/wmi.c (ath12k_wmi_send_scan_start_cmd):
+   The driver computes arg->scan_priority (WMI_SCAN_PRIORITY_MEDIUM when
+   ar->state_11d == ATH12K_11D_PREPARING, otherwise WMI_SCAN_PRIORITY_LOW)
+   so the initial host scan will not be preempted by the MEDIUM-priority
+   firmware 11d scan, but never writes arg->scan_priority into
+   cmd->scan_priority. Because the WMI skb is zero-allocated, firmware
+   always receives WMI_SCAN_PRIORITY_VERY_LOW (0).
+
+2. drivers/net/wireless/ath/ath12k/mac.c (ath12k_mac_op_reconfig_complete):
+   ath12k already restores cached ar->alpha2 to firmware after crash
+   recovery (IEEE80211_RECONFIG_TYPE_RESTART), but returns early for
+   suspend/resume (IEEE80211_RECONFIG_TYPE_SUSPEND). Because WCN7850
+   cold-boots on resume without WoWLAN and sends default "00" (WORLD),
+   every wake drops the previously learned country code, expands the
+   channel list from 64 local channels to 101 passive WORLD channels,
+   and re-triggers a full 802.11d scan.
+
+Note: On kernels with CONFIG_ATH_REG_DYNAMIC_USER_REG_HINTS unset,
+userspace hints (`iw reg set`) are ignored by ath12k_reg_notifier(), so
+this must be fixed in the driver (and paired with userspace known-freq
+scanning such as iwd if sub-2s reconnect is desired).
+
+Signed-off-by: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+---
+ drivers/net/wireless/ath/ath12k/mac.c | 20 ++++++++++++++++++++
+ drivers/net/wireless/ath/ath12k/wmi.c |  1 +
+ 2 files changed, 21 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath12k/mac.c b/drivers/net/wireless/ath/ath12k/mac.c
+index 2c51d35..f874d99 100644
+--- a/drivers/net/wireless/ath/ath12k/mac.c
++++ b/drivers/net/wireless/ath/ath12k/mac.c
+@@ -13546,6 +13546,26 @@ ath12k_mac_op_reconfig_complete(struct ieee80211_hw *hw,
+ 
+ 	lockdep_assert_wiphy(hw->wiphy);
+ 
++	if (reconfig_type == IEEE80211_RECONFIG_TYPE_SUSPEND) {
++		guard(mutex)(&ah->hw_mutex);
++		if (ah->state != ATH12K_HW_STATE_ON)
++			return;
++
++		for_each_ar(ah, ar, i) {
++			if (ar->ab->hw_params->current_cc_support &&
++			    ar->alpha2[0] != 0 && ar->alpha2[1] != 0) {
++				struct wmi_set_current_country_arg arg = {};
++
++				ah->regd_updated = false;
++				memcpy(&arg.alpha2, ar->alpha2, 2);
++				reinit_completion(&ar->regd_update_completed);
++				ath12k_wmi_send_set_current_country_cmd(ar, &arg);
++				ath12k_mac_11d_scan_stop(ar);
++			}
++		}
++		return;
++	}
++
+ 	if (reconfig_type != IEEE80211_RECONFIG_TYPE_RESTART)
+ 		return;
+ 
+diff --git a/drivers/net/wireless/ath/ath12k/wmi.c b/drivers/net/wireless/ath/ath12k/wmi.c
+index d5160af..0028b88 100644
+--- a/drivers/net/wireless/ath/ath12k/wmi.c
++++ b/drivers/net/wireless/ath/ath12k/wmi.c
+@@ -2704,6 +2704,7 @@ int ath12k_wmi_send_scan_start_cmd(struct ath12k *ar,
+ 		arg->scan_priority = WMI_SCAN_PRIORITY_MEDIUM;
+ 	else
+ 		arg->scan_priority = WMI_SCAN_PRIORITY_LOW;
++	cmd->scan_priority = cpu_to_le32(arg->scan_priority);
+ 	cmd->notify_scan_events = cpu_to_le32(arg->notify_scan_events);
+ 
+ 	ath12k_wmi_copy_scan_event_cntrl_flags(cmd, arg);

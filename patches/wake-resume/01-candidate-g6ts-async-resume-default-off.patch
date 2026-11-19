@@ -1,0 +1,69 @@
+diff --git a/drivers/input/touchscreen/mshw0485_touch.c b/drivers/input/touchscreen/mshw0485_touch.c
+index df1605b1f..e07e6158f 100644
+--- a/drivers/input/touchscreen/mshw0485_touch.c
++++ b/drivers/input/touchscreen/mshw0485_touch.c
+@@ -149,6 +149,24 @@ enum g6ts_initialization_stage {
+  * have live ground truth.  Read-only prevents switching policy under active
+  * contacts and mixing two incompatible track coordinate spaces.
+  */
++/*
++ * Experimental phase 83: make resume nonblocking only on devices with the
++ * validated paired GPIO power/reset path.  The existing recovery worker
++ * already power-cycles the panel and waits for its reset response. Skipping
++ * the redundant synchronous 500ms + 300ms power-up in g6ts_resume() moves
++ * the verified rail/reset sequencing to work after PM device resume.
++ *
++ * This deliberately does NOT shorten either timing.  Touch input remains
++ * gated until initialization succeeds; suspend/remove synchronously cancel
++ * recovery_work.  Default OFF and read-only so booted kernels retain their
++ * proven recovery semantics. Do not enable without an attended hardware test.
++ */
++static bool g6ts_defer_resume_power_on;
++module_param_named(defer_resume_power_on, g6ts_defer_resume_power_on,
++		   bool, 0444);
++MODULE_PARM_DESC(defer_resume_power_on,
++		 "EXPERIMENTAL: defer SP11 G6TS power/reset to existing recovery worker (default: false)");
++
+ static bool g6ts_windows_orchestrator;
+ module_param_named(windows_orchestrator, g6ts_windows_orchestrator, bool, 0444);
+ MODULE_PARM_DESC(windows_orchestrator,
+@@ -3371,19 +3389,38 @@ static int g6ts_suspend(struct device *dev)
+ static int g6ts_resume(struct device *dev)
+ {
+ 	struct g6ts *ts = dev_get_drvdata(dev);
++	bool defer_power_on;
+ 	int ret;
+ 
++	/*
++	 * The hardware recovery worker already does a full power-off/reset/
++	 * power-on sequence.  When explicitly opted in, let that worker perform
++	 * the first power-up after s2idle too, instead of waiting another 800 ms
++	 * in this synchronous PM callback.  Do not alter ACPI-only variants.
++	 *
++	 * While the worker is pending, mode_enabled remains false, so the IRQ
++	 * thread cannot read the uninitialized controller or report contacts.
++	 */
++	defer_power_on = g6ts_defer_resume_power_on &&
++			 ts->power_gpio && ts->reset_gpio;
++
+ 	mutex_lock(&ts->io_lock);
+ 	ts->fatal_transport_error = false;
+ 	ts->recovery_fail_streak = 0;
+ 	ts->recovery_path = G6TS_RECOVERY_HARDWARE;
+-	ret = g6ts_power_on(ts);
++	if (defer_power_on) {
++		WRITE_ONCE(ts->mode_enabled, false);
++		ret = 0;
++	} else {
++		ret = g6ts_power_on(ts);
++	}
+ 	mutex_unlock(&ts->io_lock);
+ 	if (ret)
+ 		return ret;
+ 
+ 	enable_irq(ts->interrupt_irq);
+ 	schedule_delayed_work(&ts->recovery_work,
++			      defer_power_on ? 0 :
+ 			      msecs_to_jiffies(G6TS_RECOVERY_DELAY_MS));
+ 	return 0;
+ }

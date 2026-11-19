@@ -1,0 +1,14 @@
+/dts-v1/;
+/plugin/;
+
+&{/smp2p-adsp} {
+    smp2p_adsp_sleep: sleepstate {
+        qcom,entry-name = "sleepstate";
+        #qcom,smem-state-cells = <1>;
+    };
+};
+
+&remoteproc_adsp {
+    qcom,smem-states = <&smp2p_adsp_out 0>, <&smp2p_adsp_sleep 12>;
+    qcom,smem-state-names = "stop", "sleepstate";
+};

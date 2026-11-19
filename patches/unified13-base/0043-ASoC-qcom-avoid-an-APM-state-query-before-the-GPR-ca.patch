@@ -1,0 +1,27 @@
+From 2fa94dc1319aea59e4ce9c0d8a1a4db1b4617ff9 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 07:40:34 +0000
+Subject: [PATCH 43/47] ASoC: qcom: avoid an APM state query before the GPR
+ callback is installed
+
+---
+ sound/soc/qcom/qdsp6/q6apm.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index becd38adb..81492a562 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -2051,7 +2051,11 @@ static int apm_probe(gpr_device_t *gdev)
+ 
+ 	g_apm = apm;
+ 
+-	q6apm_get_apm_state(apm);
++	/*
++	 * The GPR bus installs our reply callback only after probe returns.
++	 * Query readiness via q6apm_is_adsp_ready() once the service is bound;
++	 * a synchronous query here cannot receive its reply.
++	 */
+ 
+ 	ret = snd_soc_register_component(dev, &q6apm_audio_component, NULL, 0);
+ 	if (ret < 0) {

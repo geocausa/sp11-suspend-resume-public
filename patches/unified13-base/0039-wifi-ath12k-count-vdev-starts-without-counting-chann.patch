@@ -1,0 +1,25 @@
+From e9e5dd622ee88f33fdc7e275963d0cb9e42aa40a Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 08:43:11 +0000
+Subject: [PATCH 39/47] wifi: ath12k: count vdev starts without counting
+ channel restarts
+
+Apply the upstream-proposed guard for the observed WCN7850 post-CSA firmware-statistics stall. Count only starts; restarts retain the existing started-vdev count. Proposal: https://lkml.iu.edu/2610.2/11945.html (Birk Skyum); matching developer analysis: https://lore-kernel.gnuweeb.org/ath12k/f9d0a06d-b7b0-4e51-8173-c53104c2a096@oss.qualcomm.com/T/ . Candidate only; hardware acceptance pending.
+---
+ drivers/net/wireless/ath/ath12k/mac.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/ath/ath12k/mac.c b/drivers/net/wireless/ath/ath12k/mac.c
+index 99bf5cf79..2c51d3567 100644
+--- a/drivers/net/wireless/ath/ath12k/mac.c
++++ b/drivers/net/wireless/ath/ath12k/mac.c
+@@ -11461,7 +11461,8 @@ ath12k_mac_vdev_start_restart(struct ath12k_link_vif *arvif,
+ 						   &arvif->reg_tpc_info);
+ 	}
+ 
+-	ar->num_started_vdevs++;
++	if (!restart)
++		ar->num_started_vdevs++;
+ 	ath12k_dbg(ab, ATH12K_DBG_MAC,  "vdev %pM started, vdev_id %d\n",
+ 		   ahvif->vif->addr, arvif->vdev_id);
+ 

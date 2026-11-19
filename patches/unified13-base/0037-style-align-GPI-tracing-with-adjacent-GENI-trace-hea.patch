@@ -1,0 +1,130 @@
+From 83eed3ee20e3a86da9ed0c5d5e817217e8afe6cf Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 21:29:20 +0000
+Subject: [PATCH 37/47] style: align GPI tracing with adjacent GENI trace
+ headers
+
+---
+ drivers/dma/qcom/gpi.c          |  4 +-
+ include/trace/events/qcom_gpi.h | 90 +++++++++++++++------------------
+ 2 files changed, 44 insertions(+), 50 deletions(-)
+
+diff --git a/drivers/dma/qcom/gpi.c b/drivers/dma/qcom/gpi.c
+index 60a3219b0..753f94067 100644
+--- a/drivers/dma/qcom/gpi.c
++++ b/drivers/dma/qcom/gpi.c
+@@ -2192,8 +2192,8 @@ static void gpi_issue_pending(struct dma_chan *chan)
+ 
+ 	gpi_desc->db = ch_ring->wp;
+ 	trace_gpi_submit(gpii->gpii_id, gchan->chid, vd->tx.cookie,
+-			ch_ring->phys_addr, to_physical(ch_ring, gpi_desc->db),
+-			gpi_desc->len);
++			 ch_ring->phys_addr, to_physical(ch_ring, gpi_desc->db),
++			 gpi_desc->len);
+ 	gpi_write_ch_db(gchan, &gchan->ch_ring, gpi_desc->db);
+ 	read_unlock_irqrestore(&gpii->pm_lock, pm_lock_flags);
+ }
+diff --git a/include/trace/events/qcom_gpi.h b/include/trace/events/qcom_gpi.h
+index 479890a8c..07c720892 100644
+--- a/include/trace/events/qcom_gpi.h
++++ b/include/trace/events/qcom_gpi.h
+@@ -8,57 +8,51 @@
+ #include <linux/tracepoint.h>
+ 
+ TRACE_EVENT(gpi_event,
+-
+-	TP_PROTO(u32 instance, u32 offset, u64 producer, const u32 *words),
+-	TP_ARGS(instance, offset, producer, words),
+-
+-	TP_STRUCT__entry(
+-		__field(u32, instance)
+-		__field(u32, offset)
+-		__field(u64, producer)
+-		__array(u32, words, 4)
+-	),
+-
+-	TP_fast_assign(
+-		__entry->instance = instance;
+-		__entry->offset = offset;
+-		__entry->producer = producer;
+-		memcpy(__entry->words, words, sizeof(__entry->words));
+-	),
+-
+-	TP_printk("instance=%u offset=%u producer=%#llx event=%08x:%08x:%08x:%08x",
+-		  __entry->instance, __entry->offset, __entry->producer,
+-		  __entry->words[0], __entry->words[1],
+-		  __entry->words[2], __entry->words[3])
++	    TP_PROTO(u32 instance, u32 offset, u64 producer, const u32 *words),
++	    TP_ARGS(instance, offset, producer, words),
++
++	    TP_STRUCT__entry(__field(u32, instance)
++			     __field(u32, offset)
++			     __field(u64, producer)
++			     __array(u32, words, 4)
++	    ),
++
++	    TP_fast_assign(__entry->instance = instance;
++			   __entry->offset = offset;
++			   __entry->producer = producer;
++			   memcpy(__entry->words, words, sizeof(__entry->words));
++	    ),
++
++	    TP_printk("instance=%u offset=%u producer=%#llx event=%08x:%08x:%08x:%08x",
++		      __entry->instance, __entry->offset, __entry->producer,
++		      __entry->words[0], __entry->words[1],
++		      __entry->words[2], __entry->words[3])
+ );
+ 
+ TRACE_EVENT(gpi_submit,
+-
+-	TP_PROTO(u32 instance, u32 channel, int cookie, u64 base,
+-		 u64 doorbell, u32 length),
+-	TP_ARGS(instance, channel, cookie, base, doorbell, length),
+-
+-	TP_STRUCT__entry(
+-		__field(u32, instance)
+-		__field(u32, channel)
+-		__field(int, cookie)
+-		__field(u64, base)
+-		__field(u64, doorbell)
+-		__field(u32, length)
+-	),
+-
+-	TP_fast_assign(
+-		__entry->instance = instance;
+-		__entry->channel = channel;
+-		__entry->cookie = cookie;
+-		__entry->base = base;
+-		__entry->doorbell = doorbell;
+-		__entry->length = length;
+-	),
+-
+-	TP_printk("instance=%u channel=%u cookie=%d base=%#llx doorbell=%#llx length=%u",
+-		  __entry->instance, __entry->channel, __entry->cookie,
+-		  __entry->base, __entry->doorbell, __entry->length)
++	    TP_PROTO(u32 instance, u32 channel, int cookie, u64 base,
++		     u64 doorbell, u32 length),
++	    TP_ARGS(instance, channel, cookie, base, doorbell, length),
++
++	    TP_STRUCT__entry(__field(u32, instance)
++			     __field(u32, channel)
++			     __field(int, cookie)
++			     __field(u64, base)
++			     __field(u64, doorbell)
++			     __field(u32, length)
++	    ),
++
++	    TP_fast_assign(__entry->instance = instance;
++			   __entry->channel = channel;
++			   __entry->cookie = cookie;
++			   __entry->base = base;
++			   __entry->doorbell = doorbell;
++			   __entry->length = length;
++	    ),
++
++	    TP_printk("instance=%u channel=%u cookie=%d base=%#llx doorbell=%#llx length=%u",
++		      __entry->instance, __entry->channel, __entry->cookie,
++		      __entry->base, __entry->doorbell, __entry->length)
+ );
+ 
+ #endif /* _TRACE_QCOM_GPI_H */

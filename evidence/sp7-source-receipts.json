@@ -1,0 +1,27 @@
+{
+  "target": "Surface Pro 11 OLED, X1E80100",
+  "analysis_workstation": "Surface Pro 7, x86-64 Windows",
+  "notes": "SHA-256 values come from SP7's original trace manifests and review. These record provenance, not distribution of the underlying files.",
+  "sp7_durable_archive_manifest": [
+    {
+      "capture": "2026-11-16 USB-C charger insertion",
+      "bytes": 58171,
+      "sha256": "2b4ea9dc7669cc2d55dca8f06d74b939f68042b58f750e14af793fab3c98004f"
+    },
+    {
+      "capture": "2026-11-16 USB-C charger removal",
+      "bytes": 52242,
+      "sha256": "0ca6cdf051962f005f63d5eef82e243c1903a21231a7950805fa08690978ea87"
+    },
+    {
+      "capture": "2026-11-18 AC Modern Standby Owner, PPP and RuntimeFx",
+      "bytes": 531364,
+      "sha256": "3bdd98cebab974cc15f9db2a63858c45dcd5c0318bf641f1ebdf3f7863287a8f"
+    },
+    {
+      "capture": "2026-11-18 AC Modern Standby SleepStudy",
+      "bytes": 137627,
+      "sha256": "e59dd9390337679951737efdd6e54041c45ca8f1a7892006f0728ee06a5592fb"
+    }
+  ]
+}

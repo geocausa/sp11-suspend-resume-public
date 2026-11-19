@@ -1,0 +1,55 @@
+From f2c0c9854711a9bad799b39ea20c68ad30264b33 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 14:20:05 +0000
+Subject: [PATCH 27/47] ASoC: qcom: q6apm: restore SP11 GET_CFG responses
+
+---
+ sound/soc/qcom/qdsp6/q6apm.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index 37a9f1deb..f7f064a44 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -858,11 +858,33 @@ static int graph_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ 	struct device *dev = graph->dev;
+ 	uint32_t client_event;
+ 	phys_addr_t phys;
++	size_t dump_len;
+ 	int token;
+ 
+ 	result = data->payload;
+ 
+ 	switch (hdr->opcode) {
++	case APM_CMD_RSP_GET_CFG:
++		graph->result.opcode = hdr->opcode;
++		if (data->payload_size < sizeof(u32)) {
++			dev_err(dev,
++				"SP11 GET_CFG response token=%#x is truncated: %d bytes\n",
++				hdr->token, data->payload_size);
++			graph->result.status = -EPROTO;
++			wake_up(&graph->cmd_wait);
++			break;
++		}
++
++		graph->result.status = *(const u32 *)data->payload;
++		dump_len = min_t(size_t, data->payload_size, 512);
++		dev_info(dev,
++			 "SP11 GET_CFG response token=%#x bytes=%d status=%#x%s\n",
++			 hdr->token, data->payload_size, graph->result.status,
++			 data->payload_size > dump_len ? " (dump truncated)" : "");
++		print_hex_dump(KERN_INFO, "sp11-getcfg: ", DUMP_PREFIX_OFFSET,
++			       16, 1, data->payload, dump_len, false);
++		wake_up(&graph->cmd_wait);
++		break;
+ 	case APM_EVENT_MODULE_TO_CLIENT:
+ 		event = data->payload;
+ 		switch (event->event_id) {
+@@ -950,6 +972,7 @@ static int graph_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ 		case DATA_CMD_WR_SH_MEM_EP_MEDIA_FORMAT:
+ 		case APM_CMD_REGISTER_MODULE_EVENTS:
+ 		case APM_CMD_SET_CFG:
++		case APM_CMD_GET_CFG:
+ 			graph->result.opcode = result->opcode;
+ 			graph->result.status = result->status;
+ 			if (result->status)

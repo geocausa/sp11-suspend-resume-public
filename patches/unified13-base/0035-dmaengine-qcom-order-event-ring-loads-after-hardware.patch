@@ -1,0 +1,30 @@
+From 41c4f3fc323eb50e0c5b0ccb25426281ef11a5b6 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 21:27:25 +0000
+Subject: [PATCH 35/47] dmaengine: qcom: order event ring loads after hardware
+ progress
+
+---
+ drivers/dma/qcom/gpi.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/dma/qcom/gpi.c b/drivers/dma/qcom/gpi.c
+index 29ac1ae29..1da5386ce 100644
+--- a/drivers/dma/qcom/gpi.c
++++ b/drivers/dma/qcom/gpi.c
+@@ -657,8 +657,13 @@ static inline u32 gpi_read_reg(struct gpii *gpii, void __iomem *addr)
+ 
+ static phys_addr_t gpi_read_ev_rp(struct gpii *gpii)
+ {
+-	u32 lsb = gpi_read_reg(gpii, gpii->ev_ring_rp_lsb_reg);
+-	u32 msb = gpi_read_reg(gpii, gpii->ev_ring_rp_lsb_reg + 4);
++	/*
++	 * The hardware RP publishes DMA writes to the coherent event ring.
++	 * Order subsequent event loads after observing that progress; relaxed
++	 * register reads alone do not serialize those DMA memory accesses.
++	 */
++	u32 lsb = readl(gpii->ev_ring_rp_lsb_reg);
++	u32 msb = readl(gpii->ev_ring_rp_lsb_reg + 4);
+ 
+ 	return ((phys_addr_t)msb << 32) | lsb;
+ }

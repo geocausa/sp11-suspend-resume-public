@@ -1,0 +1,22 @@
+From 96d3eaffde64d842d0293b3b6f40214375b85c4f Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 18:14:37 +0000
+Subject: [PATCH 28/47] ASoC: qcom: q6apm: restore unmap response opcode
+
+---
+ sound/soc/qcom/qdsp6/q6apm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index f7f064a44..86486be52 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -1703,7 +1703,7 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ 			wake_up(&apm->wait);
+ 			break;
+ 		case APM_CMD_SHARED_MEM_UNMAP_REGIONS:
+-			apm->result.opcode = hdr->opcode;
++			apm->result.opcode = result->opcode;
+ 			apm->result.status = result->status;
+ 			graph_id = hdr->token & APM_MMAP_TOKEN_GID_MASK;
+ 			is_pos_buf = hdr->token & APM_MMAP_TOKEN_MAP_TYPE_POS_BUF;

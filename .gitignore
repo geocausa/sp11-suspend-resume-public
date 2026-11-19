@@ -1,0 +1,32 @@
+# Build and kernel artifacts
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+*.order
+*.symvers
+*.dtb
+*.dtbo
+*.img
+*.cpio
+*.gz
+*.xz
+*.zst
+.tmp_versions/
+
+# Never commit proprietary firmware, raw traces, or secrets
+*.mbn
+*.bin
+*.fw
+*.sys
+*.etl
+*.evtx
+*.elf
+*.key
+*.pem
+*PASSWORD*
+
+# Python
+__pycache__/
+*.py[cod]

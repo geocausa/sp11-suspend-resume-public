@@ -1,0 +1,75 @@
+From 6f0ad5db5e53e7ff508fe43515f4ccfe78eea3f0 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:37:14 +0000
+Subject: [PATCH 26/47] ASoC: qcom: q6apm: restore SP11 protected media format
+ selection
+
+The accepted Golden-v32 protected graph does not broadcast PCM media-format commands to every non-shmem module. It targets the proven PCM_CNV instance 0x465f and MFC instance 0x466a, validates the fixed 48 kHz stereo S16_LE contract, then configures protection.\n\nUnified2 exposed the missing rebase delta live after the DP13 allocator fix: VI/CPS became ready, but the generic v7.3 format walk hit -EINVAL and PipeWire fell back to Dummy Output.\n\nRestore the accepted protected-graph selection while leaving generic v7.3 push/pull handling intact for non-SP11 graphs. Golden source function evidence SHA-256: d1eeeb5c9817ec3e8f6c253fc3c3a058475057e7475ab5556f6946672d96473b.\n\nGates: git diff --check; strict checkpatch 0/0/0; q6apm.o W=1 build with unified2 config.
+---
+ sound/soc/qcom/qdsp6/q6apm.c | 46 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 46 insertions(+)
+
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index 330d94967..37a9f1deb 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -427,6 +427,25 @@ static struct audioreach_module *__q6apm_find_module_by_mid(struct q6apm *apm,
+ 	return NULL;
+ }
+ 
++static struct audioreach_module *
++__q6apm_find_module_by_iid(struct audioreach_graph_info *info, uint32_t iid)
++{
++	struct audioreach_container *container;
++	struct audioreach_sub_graph *sgs;
++	struct audioreach_module *module;
++
++	list_for_each_entry(sgs, &info->sg_list, node) {
++		list_for_each_entry(container, &sgs->container_list, node) {
++			list_for_each_entry(module, &container->modules_list, node) {
++				if (iid == module->instance_id)
++					return module;
++			}
++		}
++	}
++
++	return NULL;
++}
++
+ int q6apm_graph_media_format_shmem(struct q6apm_graph *graph,
+ 				   struct audioreach_module_config *cfg)
+ {
+@@ -696,6 +715,33 @@ int q6apm_graph_media_format_pcm(struct q6apm_graph *graph, struct audioreach_mo
+ 	struct audioreach_module *module;
+ 	int ret;
+ 
++	if (audioreach_graph_has_protected_calibration(info)) {
++		struct audioreach_module *pcm, *mfc;
++
++		if (cfg->direction != SNDRV_PCM_STREAM_PLAYBACK ||
++		    cfg->sample_rate != 48000 || cfg->bit_width != 16 ||
++		    cfg->num_channels != 2)
++			return -EINVAL;
++
++		pcm = __q6apm_find_module_by_iid(info, 0x465f);
++		mfc = __q6apm_find_module_by_iid(info, 0x466a);
++		if (!pcm || pcm->module_id != MODULE_ID_PCM_CNV ||
++		    !mfc || mfc->module_id != MODULE_ID_MFC)
++			return -ENODEV;
++
++		ret = audioreach_set_media_format(graph, pcm, cfg);
++		if (ret)
++			return ret;
++		dev_info(graph->dev, "SP11 stage PCM_CNV media format accepted\n");
++
++		ret = audioreach_set_media_format(graph, mfc, cfg);
++		if (ret)
++			return ret;
++		dev_info(graph->dev, "SP11 stage MFC media format accepted\n");
++
++		return audioreach_configure_protection(graph);
++	}
++
+ 	list_for_each_entry(sgs, &info->sg_list, node) {
+ 		list_for_each_entry(container, &sgs->container_list, node) {
+ 			list_for_each_entry(module, &container->modules_list, node) {

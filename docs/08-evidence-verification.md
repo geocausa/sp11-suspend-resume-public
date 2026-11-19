@@ -1,0 +1,13 @@
+# Verified results and open questions
+
+The November 19 review replayed the original measurements and compared the GitHub export with its local source. The device under test was the Surface Pro 11 OLED with Snapdragon X Elite. SP7 stored and replayed the Windows evidence.
+
+| Area | Result | What remains open |
+| --- | --- | --- |
+| Linux baseline | All 47 patches applied to Linux v7.3. The public replay matches the accepted unified13 source except for two maintainer contact fields. The config matched the installed config. The tested installation booted with working touch, cold speaker playback and one battery report. | The matching installation also depends on specific firmware, topology, calibration and host setup. |
+| Short `s2idle` wake | Three device-resume-to-app-thaw measurements were 2.562, 2.541 and 2.541 seconds. The last run recovered the display, touch and speakers. | Long-term deep-resume reliability and ordinary unified13 standby power remain unqualified. Separate experimental runs had display or speaker recovery failures. |
+| Wi-Fi after wake | 15.600 seconds of the 16.345-second reconnect were in the first scan. Authentication began 72 ms after the scan ended. A separate awake scan took 9.406 seconds. | The firmware causes of the scan duration and speed gains from the proposed changes are unmeasured. |
+| Standby power | With WSA clock release and restricted QCE, the control lost 0.430 Wh in 8,721 seconds for 0.17750 W. The PLD trial lost 0.220 Wh in 4,846 seconds for 0.16342 W. The short same-boot comparison showed an approximately 896-fold drop in CXSD entry rate. | The roughly 14 mW difference is a point estimate from two long runs with different configurations. |
+| Windows comparison | The earlier Windows installation recorded about 0.105 W in each of two approximately two-hour sessions. SP7 replay confirmed USB-C software votes for `LDO15_B` changed with charger state. | The Windows and Linux runs were separate. Physical rail current and its contribution to the approximately 58 mW difference remain unmeasured. |
+
+The A3 Wi-Fi listener outlived its wrapper. The verification identified and stopped the passive listener. The original event capture was recovered byte for byte using its published SHA-256, and the kernel trace and journal retained their original hashes. The later appended events include the separate awake scan. The raw witnesses and original Windows captures remain in the private SP7 handoff. [Test detail](02-wake-latency-and-g6ts-touch.md) · [Standby calculations](01-standby-power-cxsd-aosd-pld.md) · [Windows evidence](06-sp7-windows-evidence.md) · [Source reproduction](07-reproduce-and-qualify.md)

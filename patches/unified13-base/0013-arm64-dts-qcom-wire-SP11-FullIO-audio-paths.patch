@@ -1,0 +1,131 @@
+From 8385d55f394bfb2cdbf77971a56664948f272330 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 06:32:28 +0000
+Subject: [PATCH 13/47] arm64: dts: qcom: wire SP11 FullIO audio paths
+
+Describe the accepted FullIO v19c sound graph for Microsoft Denali: stereo
+TX DMIC capture, WSA playback, VI feedback, CPS feedback and VA capture.
+Set the final FullIO-v19c0 card identity and the validated per-speaker
+feedback properties without reintroducing superseded Wi-Fi DT quirks.
+
+Signed-off-by: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+---
+ .../boot/dts/qcom/x1-microsoft-denali.dtsi    | 68 +++++++++++++++++--
+ 1 file changed, 63 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi b/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
+index 9d86e6344..da2ac5605 100644
+--- a/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
++++ b/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
+@@ -308,17 +308,35 @@ vreg_wcn_1p9: regulator-wcn-1p9 {
+ 
+ 	sound {
+ 		compatible = "qcom,x1e80100-sndcard";
+-		model = "X1E80100-Microsoft-Surface-Pro-11";
++		model = "X1E80100-Microsoft-Surface-Pro-11-FullIO-v19c0";
+ 		audio-routing = "SpkrLeft IN", "WSA WSA_SPK1 OUT",
+ 				"SpkrRight IN", "WSA WSA_SPK2 OUT",
+ 				"VA DMIC0", "vdd-micb",
+-				"VA DMIC1", "vdd-micb";
++				"VA DMIC1", "vdd-micb",
++				"TX DMIC0", "vdd-micb",
++				"TX DMIC1", "vdd-micb";
++
++		tx-dmic-dai-link {
++			link-name = "TX DMIC Capture";
++
++			codec {
++				sound-dai = <&lpass_txmacro 0>;
++			};
++
++			cpu {
++				sound-dai = <&q6apmbedai TX_CODEC_DMA_TX_3>;
++			};
++
++			platform {
++				sound-dai = <&q6apm>;
++			};
++		};
+ 
+ 		wsa-dai-link {
+ 			link-name = "WSA Playback";
+ 
+ 			codec {
+-				sound-dai = <&left_spkr>, <&right_spkr>,
++				sound-dai = <&left_spkr 0>, <&right_spkr 0>,
+ 					    <&swr0 0>, <&lpass_wsamacro 0>;
+ 			};
+ 
+@@ -331,6 +349,40 @@ platform {
+ 			};
+ 		};
+ 
++		wsa-vi-dai-link {
++			link-name = "WSA VI Protection";
++
++			codec {
++				sound-dai = <&left_spkr 1>, <&right_spkr 1>,
++					    <&swr0 9>, <&lpass_wsamacro 2>;
++			};
++
++			cpu {
++				sound-dai = <&q6apmbedai WSA_CODEC_DMA_TX_0>;
++			};
++
++			platform {
++				sound-dai = <&q6apm>;
++			};
++		};
++
++		wsa-cps-dai-link {
++			link-name = "WSA CPS Protection";
++
++			codec {
++				sound-dai = <&left_spkr 2>, <&right_spkr 2>,
++					    <&swr0 10>, <&lpass_wsamacro 4>;
++			};
++
++			cpu {
++				sound-dai = <&q6apmbedai WSA_CODEC_DMA_TX_1>;
++			};
++
++			platform {
++				sound-dai = <&q6apm>;
++			};
++		};
++
+ 		va-dai-link {
+ 			link-name = "VA Capture";
+ 
+@@ -1122,11 +1174,14 @@ left_spkr: speaker@0,0 {
+ 		compatible = "sdw20217020400";
+ 		reg = <0 0>;
+ 		reset-gpios = <&lpass_tlmm 12 GPIO_ACTIVE_LOW>;
+-		#sound-dai-cells = <0>;
++		#sound-dai-cells = <1>;
+ 		sound-name-prefix = "SpkrLeft";
+ 		vdd-1p8-supply = <&vreg_l15b_1p8>;
+ 		vdd-io-supply = <&vreg_l12b_1p2>;
+ 		qcom,port-mapping = <1 2 3 7 10 13>;
++		qcom,visense-channel-mask = <3>;
++		qcom,enable-cps;
++		qcom,cps-offset1 = <0>;
+ 	};
+ 
+ 	/* WSA8845, Right Speaker */
+@@ -1134,11 +1189,14 @@ right_spkr: speaker@0,1 {
+ 		compatible = "sdw20217020400";
+ 		reg = <0 1>;
+ 		reset-gpios = <&lpass_tlmm 12 GPIO_ACTIVE_LOW>;
+-		#sound-dai-cells = <0>;
++		#sound-dai-cells = <1>;
+ 		sound-name-prefix = "SpkrRight";
+ 		vdd-1p8-supply = <&vreg_l15b_1p8>;
+ 		vdd-io-supply = <&vreg_l12b_1p2>;
+ 		qcom,port-mapping = <4 5 6 7 11 13>;
++		qcom,visense-channel-mask = <3>;
++		qcom,enable-cps;
++		qcom,cps-offset1 = <25>;
+ 	};
+ };
+ 

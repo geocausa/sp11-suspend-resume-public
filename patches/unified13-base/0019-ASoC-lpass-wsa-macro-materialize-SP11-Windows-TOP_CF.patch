@@ -1,0 +1,32 @@
+From 8f074d065a1e731bf09e507a72c410bf7af0e854 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 06:44:58 +0000
+Subject: [PATCH 19/47] ASoC: lpass-wsa-macro: materialize SP11 Windows
+ TOP_CFG1
+
+Carry the Golden-v33 Windows TOP_CFG1 programming into the v7.3 WSA macro
+so the protected speaker producer matches the accepted physical VI graph.
+
+Source: 0072-ASoC-lpass-wsa-macro-SP11-materialize-Windows-TOP-CFG1.patch
+SHA-256: 3e4b214a78c9282af49c9b3d0b2e6f5249a5d9d9b93757dc506d90bac44a96e4
+
+Signed-off-by: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+---
+ sound/soc/codecs/lpass-wsa-macro.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/sound/soc/codecs/lpass-wsa-macro.c b/sound/soc/codecs/lpass-wsa-macro.c
+index 7d5621429..fb13949d2 100644
+--- a/sound/soc/codecs/lpass-wsa-macro.c
++++ b/sound/soc/codecs/lpass-wsa-macro.c
+@@ -1563,6 +1563,10 @@ static void wsa_macro_enable_disable_vi_sense(struct snd_soc_component *componen
+ 		snd_soc_component_update_bits(component, tx_reg1,
+ 					      CDC_WSA_TX_SPKR_PROT_RESET_MASK,
+ 					      CDC_WSA_TX_SPKR_PROT_NO_RESET);
++
++		/* Windows qcaucd materializes TOP_CFG1 after each enabled VI pair. */
++		if (of_machine_is_compatible("microsoft,denali"))
++			snd_soc_component_write(component, CDC_WSA_TOP_TOP_CFG1, 0x03);
+ 	} else {
+ 		snd_soc_component_update_bits(component, tx_reg0,
+ 					      CDC_WSA_TX_SPKR_PROT_RESET_MASK,

@@ -1,0 +1,84 @@
+From cedc5a624a1869df3b313dd4ac0985d2f130ed61 Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 21:38:25 +0000
+Subject: [PATCH 38/47] dmaengine: qcom: quiesce QSPI pair before clearing
+ deferred completion
+
+---
+ drivers/dma/qcom/gpi.c | 38 +++++++++++++++++++++++---------------
+ 1 file changed, 23 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/dma/qcom/gpi.c b/drivers/dma/qcom/gpi.c
+index 753f94067..2c7007db9 100644
+--- a/drivers/dma/qcom/gpi.c
++++ b/drivers/dma/qcom/gpi.c
+@@ -1697,12 +1697,10 @@ static void gpi_queue_xfer(struct gpii *gpii, struct gchan *gchan,
+ 
+ static void gpi_qspi_clear_deferred(struct gpii *gpii)
+ {
+-	if (!gpii->qspi_deferred_vd)
+-		return;
+-	timer_delete_sync(&gpii->qspi_deferred_timer);
+-
+-	dev_warn(gpii->gpi_dev->dev,
+-		 "SP11 QSPI clearing stale deferred TX completion on terminate/reset\n");
++	/* Caller holds pm_lock for write, excluding event-tasklet publication. */
++	if (gpii->qspi_deferred_vd)
++		dev_warn(gpii->gpi_dev->dev,
++			 "SP11 QSPI clearing stale deferred TX completion on terminate/reset\n");
+ 
+ 	gpii->qspi_deferred_vd = NULL;
+ 	gpii->qspi_deferred_gchan = NULL;
+@@ -1719,9 +1717,6 @@ static int gpi_terminate_all(struct dma_chan *chan)
+ 
+ 	mutex_lock(&gpii->ctrl_lock);
+ 
+-	if (gchan->protocol == QCOM_GPI_QSPI)
+-		gpi_qspi_clear_deferred(gpii);
+-
+ 	/*
+ 	 * treat both channels as a group if its protocol is not UART
+ 	 * STOP, RESET, or START needs to be in lockstep
+@@ -1729,15 +1724,23 @@ static int gpi_terminate_all(struct dma_chan *chan)
+ 	schid = (gchan->protocol == QCOM_GPI_UART) ? gchan->chid : 0;
+ 	echid = (gchan->protocol == QCOM_GPI_UART) ? schid + 1 : MAX_CHANNELS_PER_GPII;
+ 
++	/*
++	 * Quiesce the whole pair and clear its deferred pointer atomically with
++	 * respect to the event tasklet. Clearing first leaves a window in which
++	 * a TX EOT can publish another descriptor that reset subsequently frees.
++	 */
++	write_lock_irq(&gpii->pm_lock);
++	for (i = schid; i < echid; i++)
++		gpii->gchan[i].pm_state = PREPARE_TERMINATE;
++	if (gchan->protocol == QCOM_GPI_QSPI)
++		gpi_qspi_clear_deferred(gpii);
++	write_unlock_irq(&gpii->pm_lock);
++	if (gchan->protocol == QCOM_GPI_QSPI)
++		timer_delete_sync(&gpii->qspi_deferred_timer);
++
+ 	/* stop the channel */
+ 	for (i = schid; i < echid; i++) {
+ 		gchan = &gpii->gchan[i];
+-
+-		/* disable ch state so no more TRE processing */
+-		write_lock_irq(&gpii->pm_lock);
+-		gchan->pm_state = PREPARE_TERMINATE;
+-		write_unlock_irq(&gpii->pm_lock);
+-
+ 		/* send command to Stop the channel */
+ 		ret = gpi_stop_chan(gchan);
+ 	}
+@@ -2295,7 +2298,12 @@ static void gpi_free_chan_resources(struct dma_chan *chan)
+ 	/* disable ch state so no more TRE processing for this channel */
+ 	write_lock_irq(&gpii->pm_lock);
+ 	gchan->pm_state = PREPARE_TERMINATE;
++	if (gchan->protocol == QCOM_GPI_QSPI &&
++	    gpii->qspi_deferred_gchan == gchan)
++		gpi_qspi_clear_deferred(gpii);
+ 	write_unlock_irq(&gpii->pm_lock);
++	if (gchan->protocol == QCOM_GPI_QSPI && gchan->chid == GPI_TX_CHAN)
++		timer_delete_sync(&gpii->qspi_deferred_timer);
+ 
+ 	/* attempt to do graceful hardware shutdown */
+ 	if (cur_state == ACTIVE_STATE) {

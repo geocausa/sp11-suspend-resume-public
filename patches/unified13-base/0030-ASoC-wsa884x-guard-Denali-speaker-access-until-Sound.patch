@@ -1,0 +1,154 @@
+From 59e5dc3515679e77e04420c0338dbba85bd2ab9c Mon Sep 17 00:00:00 2001
+From: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 00:10:52 +0000
+Subject: [PATCH 30/47] ASoC: wsa884x: guard Denali speaker access until
+ SoundWire is ready
+
+On unified6, controlled zero-stream traces show codec resume enabling
+regmap access and speaker START running while both SoundWire peripherals
+remain UNATTACHED. Multiple status registers then return the same 0x21
+byte with a successful transport result, triggering recovery loops.
+Waking and validating both codecs before playback restores the Golden
+2f/00, zero-error PA state.
+
+For initialized Denali Windows-profile codecs, wait for SoundWire core
+initialization before runtime regcache sync and PCM prepare, and check
+readiness again before PA start. Return status-read/recovery errors and
+run the existing STOP table on a failed post-start check instead of
+reporting protection clocks up. Generic profiles and feedback mute
+handling retain their existing paths.
+
+This is a defensive candidate, not a boot-tested controller wake fix.
+The ASoC trigger path ignores mute callback returns, so runtime-PM and
+prepare errors provide the early failure gates. No clock-framework
+rewrite, calibration change, full kernel build or deployment is
+included.
+
+Signed-off-by: SP11 Linux Project <272055834+geocausa@users.noreply.github.com>
+---
+ sound/soc/codecs/wsa884x.c | 66 +++++++++++++++++++++++++++++++++++---
+ 1 file changed, 61 insertions(+), 5 deletions(-)
+
+diff --git a/sound/soc/codecs/wsa884x.c b/sound/soc/codecs/wsa884x.c
+index 56ce25655..98d8a2356 100644
+--- a/sound/soc/codecs/wsa884x.c
++++ b/sound/soc/codecs/wsa884x.c
+@@ -1788,6 +1788,27 @@ static bool wsa884x_sp11_windows_profile(struct wsa884x_priv *wsa884x)
+ 	       wsa884x->supply_config == WSA884X_SUPPLY_2S;
+ }
+ 
++static int wsa884x_sp11_wait_for_ready(struct wsa884x_priv *wsa884x)
++{
++	struct sdw_slave *slave = wsa884x->slave;
++	enum sdw_slave_status status;
++	int ret;
++
++	if (!wsa884x_sp11_windows_profile(wsa884x) || !wsa884x->hw_init)
++		return 0;
++
++	/* Parent runtime resume can finish before the peripherals reattach. */
++	ret = sdw_slave_wait_for_init(slave, 1000);
++	if (ret)
++		return ret;
++
++	status = READ_ONCE(slave->status);
++	if (status != SDW_SLAVE_ATTACHED && status != SDW_SLAVE_ALERT)
++		return -ENODEV;
++
++	return 0;
++}
++
+ static void wsa884x_sp11_write_sequence(struct wsa884x_priv *wsa884x,
+ 					const struct reg_sequence *sequence,
+ 					size_t count)
+@@ -2389,6 +2410,7 @@ static int wsa884x_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
+ 	struct snd_soc_component *component = dai->component;
+ 	struct wsa884x_priv *wsa884x = snd_soc_component_get_drvdata(component);
+ 	unsigned int sta1 = 0;
++	int ret;
+ 
+ 	/* The VI sidechain is modelled as a playback DAI for DPCM linkage. */
+ 	if (dai->id != 0)
+@@ -2406,18 +2428,29 @@ static int wsa884x_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
+ 			wsa884x_sp11_write_sequence(wsa884x, sp11_windows_stop,
+ 						    ARRAY_SIZE(sp11_windows_stop));
+ 		} else {
++			ret = wsa884x_sp11_wait_for_ready(wsa884x);
++			if (ret)
++				return ret;
++
+ 			/* Recovery is contingency-only; the clean path adds no writes. */
+-			if (!regmap_read(wsa884x->regmap, WSA884X_PA_FSM_STA1, &sta1) &&
+-			    (sta1 & WSA884X_PA_ERROR_MASK))
++			ret = regmap_read(wsa884x->regmap, WSA884X_PA_FSM_STA1, &sta1);
++			if (ret)
++				return ret;
++			if (sta1 & WSA884X_PA_ERROR_MASK)
+ 				wsa884x_recover_pa(wsa884x, false);
+ 
+ 			wsa884x_sp11_write_sequence(wsa884x, sp11_windows_start,
+ 						    ARRAY_SIZE(sp11_windows_start));
+ 			usleep_range(1000, 1100);
+ 
+-			if (!regmap_read(wsa884x->regmap, WSA884X_PA_FSM_STA1, &sta1) &&
+-			    (sta1 & WSA884X_PA_ERROR_MASK))
+-				wsa884x_recover_pa(wsa884x, true);
++			ret = regmap_read(wsa884x->regmap, WSA884X_PA_FSM_STA1, &sta1);
++			if (ret)
++				goto sp11_start_failed;
++			if (sta1 & WSA884X_PA_ERROR_MASK) {
++				ret = wsa884x_recover_pa(wsa884x, true);
++				if (ret)
++					goto sp11_start_failed;
++			}
+ 
+ 			if (!wsa884x->sp11_protclk_reported) {
+ 				wsa_macro_sp11_pa_event(true);
+@@ -2426,6 +2459,15 @@ static int wsa884x_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
+ 		}
+ 
+ 		return 0;
++
++sp11_start_failed:
++		if (wsa884x->sp11_protclk_reported) {
++			wsa_macro_sp11_pa_event(false);
++			wsa884x->sp11_protclk_reported = false;
++		}
++		wsa884x_sp11_write_sequence(wsa884x, sp11_windows_stop,
++					    ARRAY_SIZE(sp11_windows_stop));
++		return ret;
+ 	}
+ 
+ 	if (mute) {
+@@ -2490,7 +2532,16 @@ static int wsa884x_set_stream(struct snd_soc_dai *dai,
+ 	return 0;
+ }
+ 
++static int wsa884x_prepare(struct snd_pcm_substream *substream,
++			   struct snd_soc_dai *dai)
++{
++	struct wsa884x_priv *wsa884x = dev_get_drvdata(dai->dev);
++
++	return wsa884x_sp11_wait_for_ready(wsa884x);
++}
++
+ static const struct snd_soc_dai_ops wsa884x_dai_ops = {
++	.prepare = wsa884x_prepare,
+ 	.hw_params = wsa884x_hw_params,
+ 	.hw_free = wsa884x_hw_free,
+ 	.mute_stream = wsa884x_mute_stream,
+@@ -2896,9 +2947,14 @@ static int wsa884x_runtime_suspend(struct device *dev)
+ 
+ static int wsa884x_runtime_resume(struct device *dev)
+ {
++	struct wsa884x_priv *wsa884x = dev_get_drvdata(dev);
+ 	struct regmap *regmap = dev_get_regmap(dev, NULL);
+ 	int ret;
+ 
++	ret = wsa884x_sp11_wait_for_ready(wsa884x);
++	if (ret)
++		return ret;
++
+ 	regcache_cache_only(regmap, false);
+ 	ret = regcache_sync(regmap);
+ 	if (ret) {
